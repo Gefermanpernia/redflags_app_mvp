@@ -1,105 +1,37 @@
-# App de Monitoreo de Red Flags de Agentes
+# Red Flags App MVP v1.1
 
-MVP funcional basado en el PRD para:
+Evolución del MVP a una versión operable para producción ligera, manteniendo flujo Streamlit.
 
-- subir Excel de producción y de citas
-- seleccionar hojas a procesar
-- mapear columnas desde la UI
-- normalizar agentes
-- convertir producción MTD a producción semanal cerrada
-- detectar red flags semanales y mensuales
-- revisar dashboard, detalle por agente e histórico
-- exportar reportes en CSV, Excel y PDF
+## Novedades v1.1
 
-## Stack
+- Validaciones de calidad por hoja y dataset.
+- Bloqueo de procesamiento cuando hay meses mezclados en una misma hoja.
+- Resumen de calidad en UI.
+- Matching de agentes con alias configurables vía CSV (`alias,canonical`).
+- Score de riesgo `risk_score` (0-100) agregado a flags y summary.
+- Dashboard con filtros por mes/semana/jerarquía/severidad/tipo de bandera.
+- KPIs por jerarquía y priorización de sospechosos por riesgo.
+- Persistencia migrada a SQLite + SQLAlchemy con trazabilidad de archivo/hoja/usuario.
+- DX: `Makefile`, `ruff`, tests ampliados.
 
-- Python 3.11+
-- Streamlit
-- pandas + openpyxl
-- reportlab
+## Fórmula de riesgo
 
-## Estructura
+`risk_score = puntos_regla + puntos_severidad + intensidad_métrica`, limitado entre 0 y 100.
 
-```text
-redflags_app_mvp/
-├── app.py
-├── requirements.txt
-├── README.md
-├── src/
-│   ├── config.py
-│   ├── normalization.py
-│   ├── parsers.py
-│   ├── metrics.py
-│   ├── red_flags.py
-│   ├── reports.py
-│   ├── persistence.py
-│   └── pipeline.py
-├── tests/
-│   └── test_pipeline.py
-└── data/
-    └── history/
-```
+- `puntos_regla`: RF-001=25, RF-002=30, RF-003=20.
+- `puntos_severidad`: baja=5, media=12, media-alta=18, alta=25, crítica=35.
+- `intensidad_métrica`: escala por cuánto excede cada umbral por regla.
 
-## Cómo correr
+## Uso rápido
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
+make install
+make run
 ```
 
-## Flujo de uso
-
-1. En la pestaña **Carga**, sube el Excel de producción.
-2. Selecciona si viene en formato **long** o **wide**.
-3. Escoge las hojas a procesar.
-4. Mapea columnas requeridas.
-5. Repite el proceso con el Excel de citas.
-6. Ajusta los umbrales en la barra lateral.
-7. Haz clic en **Procesar archivos**.
-8. Revisa **Dashboard**, **Detalle**, **Reportes** e **Histórico**.
-
-## Supuestos de datos
-
-### Producción
-La app soporta dos layouts:
-
-- **long**: una fila por agente/semana con `produccion_mtd`
-- **wide**: una fila por agente con columnas `MTD semana 1..5`
-
-### Citas
-La app soporta dos layouts:
-
-- **long**: una fila por agente/semana con `citas`
-- **wide**: una fila por agente con columnas `citas semana 1..5`
-
-## Reglas implementadas
-
-### RF-001
-Sin citas y alta producción mensual.
-
-### RF-002
-Pico en última semana sin actividad previa.
-
-### RF-003
-Pocas o cero citas con alta producción semanal.
-
-## Trazabilidad
-
-Cada corrida guarda artefactos en `data/history/<mes>/<timestamp>/` y registra auditoría en `data/audit_log.csv`.
-
-## Pruebas
+## Calidad y pruebas
 
 ```bash
-pytest
+make lint
+make test
 ```
-
-## Próximas mejoras sugeridas
-
-- persistencia en base de datos
-- autenticación y control por supervisor
-- matching más inteligente de nombres
-- bitácora de revisión por caso
-- scoring de riesgo multicriterio
-- carga automática diaria

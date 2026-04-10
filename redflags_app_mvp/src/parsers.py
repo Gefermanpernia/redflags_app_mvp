@@ -13,7 +13,9 @@ def load_excel_sheets(uploaded_file: BinaryIO) -> List[str]:
     return excel.sheet_names
 
 
-def load_selected_frames(uploaded_file: BinaryIO, selected_sheets: Iterable[str]) -> Dict[str, pd.DataFrame]:
+def load_selected_frames(
+    uploaded_file: BinaryIO, selected_sheets: Iterable[str]
+) -> Dict[str, pd.DataFrame]:
     uploaded_file.seek(0)
     content = uploaded_file.read()
     result: Dict[str, pd.DataFrame] = {}
@@ -65,7 +67,11 @@ def normalize_week(value) -> int | None:
 
 
 def normalize_month_value(value, fallback_month: str) -> str:
-    if value is None or (isinstance(value, float) and pd.isna(value)) or str(value).strip() == "":
+    if (
+        value is None
+        or (isinstance(value, float) and pd.isna(value))
+        or str(value).strip() == ""
+    ):
         return fallback_month
     if hasattr(value, "strftime"):
         try:
@@ -96,20 +102,26 @@ def parse_production_frames(
                     "agent_name": _safe_series(df, mapping.get("agent_name")),
                     "hierarchy": _safe_series(df, mapping.get("hierarchy"), default=""),
                     "week": _safe_series(df, mapping.get("week")),
-                    "production_mtd": pd.to_numeric(_safe_series(df, mapping.get("production_mtd")), errors="coerce"),
-                    "month": _safe_series(df, mapping.get("month"), default=fallback_month),
+                    "production_mtd": pd.to_numeric(
+                        _safe_series(df, mapping.get("production_mtd")), errors="coerce"
+                    ),
+                    "month": _safe_series(
+                        df, mapping.get("month"), default=fallback_month
+                    ),
                     "source_sheet": sheet_name,
                 }
             )
             out["week"] = out["week"].apply(normalize_week)
-            out["month"] = out["month"].apply(lambda value: normalize_month_value(value, fallback_month))
+            out["month"] = out["month"].apply(
+                lambda value: normalize_month_value(value, fallback_month)
+            )
             out = out.dropna(subset=["production_mtd"])
             out = out[out["agent_name"].astype(str).str.strip() != ""]
             out = out.dropna(subset=["week"])
-            out = (
-                out.groupby(["source_sheet", "month", "agent_name", "hierarchy", "week"], as_index=False)["production_mtd"]
-                .max()
-            )
+            out = out.groupby(
+                ["source_sheet", "month", "agent_name", "hierarchy", "week"],
+                as_index=False,
+            )["production_mtd"].max()
             parsed.append(out)
             continue
 
@@ -123,8 +135,12 @@ def parse_production_frames(
                     "agent_name": _safe_series(df, mapping.get("agent_name")),
                     "hierarchy": _safe_series(df, mapping.get("hierarchy"), default=""),
                     "week": week,
-                    "production_mtd": pd.to_numeric(_safe_series(df, column_name), errors="coerce"),
-                    "month": _safe_series(df, mapping.get("month"), default=fallback_month),
+                    "production_mtd": pd.to_numeric(
+                        _safe_series(df, column_name), errors="coerce"
+                    ),
+                    "month": _safe_series(
+                        df, mapping.get("month"), default=fallback_month
+                    ),
                     "source_sheet": sheet_name,
                 }
             )
@@ -134,17 +150,27 @@ def parse_production_frames(
             continue
 
         out = pd.concat(wide_rows, ignore_index=True)
-        out["month"] = out["month"].apply(lambda value: normalize_month_value(value, fallback_month))
+        out["month"] = out["month"].apply(
+            lambda value: normalize_month_value(value, fallback_month)
+        )
         out = out.dropna(subset=["production_mtd"])
         out = out[out["agent_name"].astype(str).str.strip() != ""]
-        out = (
-            out.groupby(["source_sheet", "month", "agent_name", "hierarchy", "week"], as_index=False)["production_mtd"]
-            .max()
-        )
+        out = out.groupby(
+            ["source_sheet", "month", "agent_name", "hierarchy", "week"], as_index=False
+        )["production_mtd"].max()
         parsed.append(out)
 
     if not parsed:
-        return pd.DataFrame(columns=["month", "agent_name", "hierarchy", "week", "production_mtd", "source_sheet"])
+        return pd.DataFrame(
+            columns=[
+                "month",
+                "agent_name",
+                "hierarchy",
+                "week",
+                "production_mtd",
+                "source_sheet",
+            ]
+        )
 
     return pd.concat(parsed, ignore_index=True)
 
@@ -164,20 +190,26 @@ def parse_appointments_frames(
                     "agent_name": _safe_series(df, mapping.get("agent_name")),
                     "hierarchy": _safe_series(df, mapping.get("hierarchy"), default=""),
                     "week": _safe_series(df, mapping.get("week")),
-                    "appointments": pd.to_numeric(_safe_series(df, mapping.get("appointments")), errors="coerce"),
-                    "month": _safe_series(df, mapping.get("month"), default=fallback_month),
+                    "appointments": pd.to_numeric(
+                        _safe_series(df, mapping.get("appointments")), errors="coerce"
+                    ),
+                    "month": _safe_series(
+                        df, mapping.get("month"), default=fallback_month
+                    ),
                     "source_sheet": sheet_name,
                 }
             )
             out["week"] = out["week"].apply(normalize_week)
-            out["month"] = out["month"].apply(lambda value: normalize_month_value(value, fallback_month))
+            out["month"] = out["month"].apply(
+                lambda value: normalize_month_value(value, fallback_month)
+            )
             out = out.dropna(subset=["appointments"])
             out = out[out["agent_name"].astype(str).str.strip() != ""]
             out = out.dropna(subset=["week"])
-            out = (
-                out.groupby(["source_sheet", "month", "agent_name", "hierarchy", "week"], as_index=False)["appointments"]
-                .sum()
-            )
+            out = out.groupby(
+                ["source_sheet", "month", "agent_name", "hierarchy", "week"],
+                as_index=False,
+            )["appointments"].sum()
             parsed.append(out)
             continue
 
@@ -191,8 +223,12 @@ def parse_appointments_frames(
                     "agent_name": _safe_series(df, mapping.get("agent_name")),
                     "hierarchy": _safe_series(df, mapping.get("hierarchy"), default=""),
                     "week": week,
-                    "appointments": pd.to_numeric(_safe_series(df, column_name), errors="coerce"),
-                    "month": _safe_series(df, mapping.get("month"), default=fallback_month),
+                    "appointments": pd.to_numeric(
+                        _safe_series(df, column_name), errors="coerce"
+                    ),
+                    "month": _safe_series(
+                        df, mapping.get("month"), default=fallback_month
+                    ),
                     "source_sheet": sheet_name,
                 }
             )
@@ -202,16 +238,26 @@ def parse_appointments_frames(
             continue
 
         out = pd.concat(wide_rows, ignore_index=True)
-        out["month"] = out["month"].apply(lambda value: normalize_month_value(value, fallback_month))
+        out["month"] = out["month"].apply(
+            lambda value: normalize_month_value(value, fallback_month)
+        )
         out = out.dropna(subset=["appointments"])
         out = out[out["agent_name"].astype(str).str.strip() != ""]
-        out = (
-            out.groupby(["source_sheet", "month", "agent_name", "hierarchy", "week"], as_index=False)["appointments"]
-            .sum()
-        )
+        out = out.groupby(
+            ["source_sheet", "month", "agent_name", "hierarchy", "week"], as_index=False
+        )["appointments"].sum()
         parsed.append(out)
 
     if not parsed:
-        return pd.DataFrame(columns=["month", "agent_name", "hierarchy", "week", "appointments", "source_sheet"])
+        return pd.DataFrame(
+            columns=[
+                "month",
+                "agent_name",
+                "hierarchy",
+                "week",
+                "appointments",
+                "source_sheet",
+            ]
+        )
 
     return pd.concat(parsed, ignore_index=True)

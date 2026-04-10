@@ -11,10 +11,8 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 
-
 def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8-sig")
-
 
 
 def build_excel_report(sheets: Dict[str, pd.DataFrame]) -> bytes:
@@ -31,7 +29,6 @@ def build_excel_report(sheets: Dict[str, pd.DataFrame]) -> bytes:
     return buffer.read()
 
 
-
 def build_pdf_report(
     flagged_agents: pd.DataFrame,
     summary: pd.DataFrame,
@@ -39,7 +36,9 @@ def build_pdf_report(
     generated_by: str,
 ) -> bytes:
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter, title=f"Reporte Red Flags {month_label}")
+    doc = SimpleDocTemplate(
+        buffer, pagesize=letter, title=f"Reporte Red Flags {month_label}"
+    )
     styles = getSampleStyleSheet()
 
     story = []
@@ -54,16 +53,30 @@ def build_pdf_report(
     story.append(Spacer(1, 12))
 
     kpis = [
-        ["Total agentes", str(summary["agent_key"].nunique() if "agent_key" in summary.columns else 0)],
-        ["Agentes con red flags", str(flagged_agents["agent_key"].nunique() if not flagged_agents.empty else 0)],
+        [
+            "Total agentes",
+            str(
+                summary["agent_key"].nunique() if "agent_key" in summary.columns else 0
+            ),
+        ],
+        [
+            "Agentes con red flags",
+            str(
+                flagged_agents["agent_key"].nunique() if not flagged_agents.empty else 0
+            ),
+        ],
         ["Red flags detectadas", str(len(flagged_agents))],
         [
             "Producción total",
-            f"{summary['production_monthly_total'].sum():,.2f}" if "production_monthly_total" in summary.columns else "0.00",
+            f"{summary['production_monthly_total'].sum():,.2f}"
+            if "production_monthly_total" in summary.columns
+            else "0.00",
         ],
         [
             "Citas totales",
-            f"{summary['appointments_month_total'].sum():,.2f}" if "appointments_month_total" in summary.columns else "0.00",
+            f"{summary['appointments_month_total'].sum():,.2f}"
+            if "appointments_month_total" in summary.columns
+            else "0.00",
         ],
     ]
 
@@ -85,10 +98,25 @@ def build_pdf_report(
     story.append(Spacer(1, 8))
 
     if flagged_agents.empty:
-        story.append(Paragraph("No se detectaron red flags para el periodo seleccionado.", styles["BodyText"]))
+        story.append(
+            Paragraph(
+                "No se detectaron red flags para el periodo seleccionado.",
+                styles["BodyText"],
+            )
+        )
     else:
         preview = flagged_agents[
-            [col for col in ["agent_name", "hierarchy", "flag_name", "severity", "reason"] if col in flagged_agents.columns]
+            [
+                col
+                for col in [
+                    "agent_name",
+                    "hierarchy",
+                    "flag_name",
+                    "severity",
+                    "reason",
+                ]
+                if col in flagged_agents.columns
+            ]
         ].head(25)
         rows = [list(preview.columns)] + preview.astype(str).values.tolist()
         table = Table(rows, repeatRows=1)
