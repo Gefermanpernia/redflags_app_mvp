@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, Mapping
 
 import pandas as pd
@@ -15,6 +14,12 @@ from src.config import (
     REQUIRED_PRODUCTION_WIDE,
     ThresholdConfig,
 )
+from src.data_quality import (
+    build_quality_summary,
+    detect_mixed_months,
+    validate_sheet_columns,
+)
+from src.normalization import load_alias_mapping
 from src.parsers import (
     load_excel_sheets,
     load_selected_frames,
@@ -26,28 +31,27 @@ from src.persistence import load_audit_log, persist_run
 from src.pipeline import run_pipeline
 from src.reports import build_excel_report, build_pdf_report, dataframe_to_csv_bytes
 
-
 st.set_page_config(page_title="Red Flags de Agentes", layout="wide")
-
-
 APP_TITLE = "App de Monitoreo de Red Flags de Agentes"
 DEFAULT_MONTH = datetime.now().strftime("%Y-%m")
 
 
-
-def render_column_mapping(columns: list[str], field_labels: Mapping[str, str], key_prefix: str) -> Dict[str, str]:
+def render_column_mapping(
+    columns: list[str], field_labels: Mapping[str, str], key_prefix: str
+) -> Dict[str, str]:
     mapping: Dict[str, str] = {}
     options = [""] + columns
     for field_key, label in field_labels.items():
-        mapping[field_key] = st.selectbox(label, options=options, key=f"{key_prefix}_{field_key}")
+        mapping[field_key] = st.selectbox(
+            label, options=options, key=f"{key_prefix}_{field_key}"
+        )
     return mapping
 
 
-
-def validate_mapping(mapping: Mapping[str, str], required_fields: list[str]) -> list[str]:
-    missing = [field for field in required_fields if not mapping.get(field)]
-    return missing
-
+def validate_mapping(
+    mapping: Mapping[str, str], required_fields: list[str]
+) -> list[str]:
+    return [field for field in required_fields if not mapping.get(field)]
 
 
 def render_sheet_preview(frames: Mapping[str, pd.DataFrame], title: str) -> None:
@@ -57,12 +61,12 @@ def render_sheet_preview(frames: Mapping[str, pd.DataFrame], title: str) -> None
             st.dataframe(frame.head(5), use_container_width=True)
 
 
-
 def build_threshold_config() -> ThresholdConfig:
     with st.sidebar:
         st.header("Configuración")
         generated_by = st.text_input("Usuario que carga", value="operador")
         month_label = st.text_input("Mes de trabajo", value=DEFAULT_MONTH)
+        alias_file = st.text_input("CSV de alias (opcional)", value="")
         monthly_threshold = st.number_input(
             "Umbral producción mensual sospechosa",
             min_value=0.0,
@@ -100,6 +104,7 @@ def build_threshold_config() -> ThresholdConfig:
 
     st.session_state["generated_by"] = generated_by
     st.session_state["month_label"] = month_label
+    st.session_state["alias_file"] = alias_file
     return ThresholdConfig(
         monthly_production_suspicious=monthly_threshold,
         weekly_production_suspicious=weekly_threshold,
@@ -110,93 +115,118 @@ def build_threshold_config() -> ThresholdConfig:
     )
 
 
-
 def render_upload_and_process(config: ThresholdConfig) -> None:
     st.subheader("Carga de archivos")
     col1, col2 = st.columns(2)
 
     with col1:
         st.markdown("### Producción")
-        production_file = st.file_uploader("Sube Excel de producción", type=["xlsx", "xlsm", "xls"], key="production_file")
+        production_file = st.file_uploader(
+            "Sube Excel de producción",
+            type=["xlsx", "xlsm", "xls"],
+            key="production_file",
+        )
         production_layout = st.radio(
             "Formato del Excel de producción",
             options=["long", "wide"],
-            format_func=lambda value: "Long (una fila por semana)" if value == "long" else "Wide (columnas por semana)",
+            format_func=lambda value: "Long (una fila por semana)"
+            if value == "long"
+            else "Wide (columnas por semana)",
             key="production_layout",
         )
-
-        production_sheets = []
-        production_frames = {}
-        production_mapping: Dict[str, str] = {}
+        production_sheets, production_frames, production_mapping = [], {}, {}
         if production_file is not None:
-            available_sheets = load_excel_sheets(production_file)
             production_sheets = st.multiselect(
                 "Hojas a procesar",
-                options=available_sheets,
-                default=available_sheets[:1],
+                options=load_excel_sheets(production_file),
                 key="production_sheets",
             )
             if production_sheets:
-                production_frames = load_selected_frames(production_file, production_sheets)
+                production_frames = load_selected_frames(
+                    production_file, production_sheets
+                )
                 render_sheet_preview(production_frames, "Preview hojas de producción")
-                production_columns = preview_columns(production_frames)
                 production_mapping = render_column_mapping(
-                    production_columns,
-                    REQUIRED_PRODUCTION_LONG if production_layout == "long" else REQUIRED_PRODUCTION_WIDE,
+                    preview_columns(production_frames),
+                    REQUIRED_PRODUCTION_LONG
+                    if production_layout == "long"
+                    else REQUIRED_PRODUCTION_WIDE,
                     key_prefix="production_map",
                 )
 
     with col2:
         st.markdown("### Citas")
-        appointments_file = st.file_uploader("Sube Excel de citas", type=["xlsx", "xlsm", "xls"], key="appointments_file")
+        appointments_file = st.file_uploader(
+            "Sube Excel de citas", type=["xlsx", "xlsm", "xls"], key="appointments_file"
+        )
         appointments_layout = st.radio(
             "Formato del Excel de citas",
             options=["long", "wide"],
-            format_func=lambda value: "Long (una fila por semana)" if value == "long" else "Wide (columnas por semana)",
+            format_func=lambda value: "Long (una fila por semana)"
+            if value == "long"
+            else "Wide (columnas por semana)",
             key="appointments_layout",
         )
-
-        appointments_sheets = []
-        appointments_frames = {}
-        appointments_mapping: Dict[str, str] = {}
+        appointments_sheets, appointments_frames, appointments_mapping = [], {}, {}
         if appointments_file is not None:
-            available_sheets = load_excel_sheets(appointments_file)
             appointments_sheets = st.multiselect(
                 "Hojas a procesar",
-                options=available_sheets,
-                default=available_sheets[:1],
+                options=load_excel_sheets(appointments_file),
                 key="appointments_sheets",
             )
             if appointments_sheets:
-                appointments_frames = load_selected_frames(appointments_file, appointments_sheets)
+                appointments_frames = load_selected_frames(
+                    appointments_file, appointments_sheets
+                )
                 render_sheet_preview(appointments_frames, "Preview hojas de citas")
-                appointments_columns = preview_columns(appointments_frames)
                 appointments_mapping = render_column_mapping(
-                    appointments_columns,
-                    REQUIRED_APPOINTMENTS_LONG if appointments_layout == "long" else REQUIRED_APPOINTMENTS_WIDE,
+                    preview_columns(appointments_frames),
+                    REQUIRED_APPOINTMENTS_LONG
+                    if appointments_layout == "long"
+                    else REQUIRED_APPOINTMENTS_WIDE,
                     key_prefix="appointments_map",
                 )
 
-    required_prod = ["agent_name", "week", "production_mtd"] if st.session_state.get("production_layout") == "long" else ["agent_name", "mtd_week_1"]
-    required_appt = ["agent_name", "week", "appointments"] if st.session_state.get("appointments_layout") == "long" else ["agent_name", "appointments_week_1"]
+    required_prod = (
+        ["agent_name", "week", "production_mtd"]
+        if production_layout == "long"
+        else ["agent_name", "mtd_week_1"]
+    )
+    required_appt = (
+        ["agent_name", "week", "appointments"]
+        if appointments_layout == "long"
+        else ["agent_name", "appointments_week_1"]
+    )
 
     if st.button("Procesar archivos", type="primary"):
         if production_file is None or appointments_file is None:
             st.error("Debes subir ambos archivos: producción y citas.")
             return
-        if not production_sheets or not appointments_sheets:
-            st.error("Selecciona al menos una hoja en ambos archivos.")
-            return
 
-        missing_prod = validate_mapping(production_mapping, required_prod)
-        missing_appt = validate_mapping(appointments_mapping, required_appt)
-        if missing_prod or missing_appt:
-            messages = []
-            if missing_prod:
-                messages.append(f"Producción: faltan {', '.join(missing_prod)}")
-            if missing_appt:
-                messages.append(f"Citas: faltan {', '.join(missing_appt)}")
-            st.error(" | ".join(messages))
+        errors = []
+        errors += (
+            [
+                f"Producción: faltan {', '.join(validate_mapping(production_mapping, required_prod))}"
+            ]
+            if validate_mapping(production_mapping, required_prod)
+            else []
+        )
+        errors += (
+            [
+                f"Citas: faltan {', '.join(validate_mapping(appointments_mapping, required_appt))}"
+            ]
+            if validate_mapping(appointments_mapping, required_appt)
+            else []
+        )
+        errors += validate_sheet_columns(
+            production_frames, production_mapping, required_prod, "Producción"
+        )
+        errors += validate_sheet_columns(
+            appointments_frames, appointments_mapping, required_appt, "Citas"
+        )
+        if errors:
+            for err in errors:
+                st.error(err)
             return
 
         raw_production = parse_production_frames(
@@ -212,17 +242,28 @@ def render_upload_and_process(config: ThresholdConfig) -> None:
             fallback_month=st.session_state["month_label"],
         )
 
-        if raw_production.empty:
-            st.error("No se pudo extraer producción. Revisa el mapeo o el formato de las hojas.")
-            return
-        if raw_appointments.empty:
-            st.error("No se pudo extraer citas. Revisa el mapeo o el formato de las hojas.")
+        mixed_month_errors = detect_mixed_months(
+            raw_production, "Producción"
+        ) + detect_mixed_months(raw_appointments, "Citas")
+        if mixed_month_errors:
+            for err in mixed_month_errors:
+                st.error(err)
+            st.error(
+                "Se bloqueó el procesamiento por calidad de datos (meses mezclados)."
+            )
             return
 
-        results = run_pipeline(raw_production, raw_appointments, config)
-        persist_run(
+        alias_mapping = load_alias_mapping(st.session_state.get("alias_file"))
+        results = run_pipeline(
+            raw_production, raw_appointments, config, alias_mapping=alias_mapping
+        )
+        run_id = persist_run(
             month_label=st.session_state["month_label"],
             generated_by=st.session_state["generated_by"],
+            production_file_name=getattr(production_file, "name", "production.xlsx"),
+            appointments_file_name=getattr(
+                appointments_file, "name", "appointments.xlsx"
+            ),
             raw_production=raw_production,
             raw_appointments=raw_appointments,
             weekly_df=results["weekly"],
@@ -231,10 +272,10 @@ def render_upload_and_process(config: ThresholdConfig) -> None:
             summary_df=results["summary"],
         )
         st.session_state["results"] = results
-        st.session_state["raw_production"] = raw_production
-        st.session_state["raw_appointments"] = raw_appointments
-        st.success("Procesamiento completado. Ya puedes revisar dashboard, detalle y reportes.")
-
+        st.session_state["quality_summary"] = build_quality_summary(
+            raw_production, raw_appointments
+        )
+        st.success(f"Procesamiento completado. Run ID: {run_id}.")
 
 
 def render_dashboard() -> None:
@@ -244,53 +285,85 @@ def render_dashboard() -> None:
         st.info("Procesa archivos para ver resultados.")
         return
 
-    weekly = results["weekly"]
-    flags = results["flags"]
-    summary = results["summary"]
-    flagged = results["flagged_agents"]
+    flags = results["flags"].copy()
+    summary = results["summary"].copy()
 
-    total_agents = summary["agent_key"].nunique() if not summary.empty else 0
-    flagged_agents = flagged["agent_key"].nunique() if not flagged.empty else 0
-    total_flags = len(flags)
-    total_production = float(summary["production_monthly_total"].sum()) if not summary.empty else 0.0
-    total_appointments = float(summary["appointments_month_total"].sum()) if not summary.empty else 0.0
+    months = ["Todos"] + sorted(summary["month"].astype(str).unique().tolist())
+    month_filter = st.selectbox("Mes", months)
+    week_filter = st.multiselect(
+        "Semana",
+        options=sorted([int(v) for v in flags["week"].dropna().unique().tolist()]),
+    )
+    hierarchy_filter = st.multiselect(
+        "Jerarquía",
+        options=sorted(summary["hierarchy"].dropna().astype(str).unique().tolist()),
+    )
+    severity_filter = st.multiselect(
+        "Severidad",
+        options=sorted(flags["severity"].dropna().astype(str).unique().tolist()),
+    )
+    flag_type_filter = st.multiselect(
+        "Tipo bandera",
+        options=sorted(flags["flag_id"].dropna().astype(str).unique().tolist()),
+    )
 
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Agentes analizados", f"{total_agents}")
-    k2.metric("Agentes con red flags", f"{flagged_agents}")
-    k3.metric("Red flags", f"{total_flags}")
-    k4.metric("Producción total", f"{total_production:,.2f}")
-    k5.metric("Citas totales", f"{total_appointments:,.0f}")
+    if month_filter != "Todos":
+        flags = flags[flags["month"] == month_filter]
+        summary = summary[summary["month"] == month_filter]
+    if week_filter:
+        flags = flags[flags["week"].isin(week_filter)]
+    if hierarchy_filter:
+        flags = flags[flags["hierarchy"].isin(hierarchy_filter)]
+        summary = summary[summary["hierarchy"].isin(hierarchy_filter)]
+    if severity_filter:
+        flags = flags[flags["severity"].isin(severity_filter)]
+    if flag_type_filter:
+        flags = flags[flags["flag_id"].isin(flag_type_filter)]
 
-    chart_col1, chart_col2 = st.columns(2)
-    with chart_col1:
-        st.markdown("#### Red flags por tipo")
-        if flags.empty:
-            st.info("Sin red flags detectadas.")
-        else:
-            type_counts = flags.groupby("flag_name").size().rename("count")
-            st.bar_chart(type_counts)
+    flagged_keys = set(flags["agent_key"].tolist())
+    flagged = summary[summary["agent_key"].isin(flagged_keys)].copy()
 
-    with chart_col2:
-        st.markdown("#### Red flags por semana")
-        if flags.empty:
-            st.info("Sin red flags detectadas.")
-        else:
-            week_counts = flags[flags["week"].notna()].groupby("week").size().rename("count")
-            if week_counts.empty:
-                st.info("No hay red flags semanales.")
-            else:
-                st.bar_chart(week_counts)
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric(
+        "Agentes analizados",
+        f"{summary['agent_key'].nunique() if not summary.empty else 0}",
+    )
+    k2.metric("Agentes con red flags", f"{len(flagged_keys)}")
+    k3.metric("Red flags", f"{len(flags)}")
+    k4.metric(
+        "Riesgo promedio",
+        f"{flags['risk_score'].mean():.1f}" if not flags.empty else "0.0",
+    )
 
-    st.markdown("#### Tabla de agentes con red flags")
+    st.markdown("#### KPIs por jerarquía")
+    if not summary.empty:
+        kpi_h = summary.groupby("hierarchy", as_index=False).agg(
+            agentes=("agent_key", "nunique"),
+            produccion=("production_monthly_total", "sum"),
+            citas=("appointments_month_total", "sum"),
+            riesgo_max=("risk_score", "max"),
+        )
+        st.dataframe(
+            kpi_h.sort_values(["riesgo_max", "produccion"], ascending=[False, False]),
+            use_container_width=True,
+        )
+
+    st.markdown("#### Tabla de agentes sospechosos")
     if flagged.empty:
-        st.success("No hay agentes sospechosos con las reglas actuales.")
+        st.success("No hay agentes sospechosos con los filtros actuales.")
     else:
-        st.dataframe(flagged, use_container_width=True)
+        st.dataframe(
+            flagged.sort_values(
+                ["risk_score", "severity", "production_monthly_total"],
+                ascending=[False, False, False],
+            ),
+            use_container_width=True,
+        )
 
-    with st.expander("Datos semanales consolidados"):
-        st.dataframe(weekly, use_container_width=True)
-
+    quality = st.session_state.get("quality_summary")
+    if quality is not None:
+        st.markdown("#### Resumen de calidad de datos")
+        st.dataframe(quality, use_container_width=True)
 
 
 def render_agent_detail() -> None:
@@ -299,42 +372,19 @@ def render_agent_detail() -> None:
     if not results:
         st.info("Procesa archivos para habilitar el detalle por agente.")
         return
-
     weekly = results["weekly"]
     flags = results["flags"]
     if weekly.empty:
-        st.info("No hay datos semanales disponibles.")
         return
-
-    agents = sorted(weekly["agent_name"].dropna().unique().tolist())
-    agent_name = st.selectbox("Selecciona un agente", options=agents)
-    agent_data = weekly[weekly["agent_name"] == agent_name].copy().sort_values(["month", "week"])
-    agent_flags = flags[flags["agent_name"] == agent_name].copy()
-
-    top_left, top_right = st.columns(2)
-    with top_left:
-        st.markdown("#### Evolución semanal de citas")
-        appointments_view = agent_data[["week", "appointments"]].set_index("week")
-        st.line_chart(appointments_view)
-
-    with top_right:
-        st.markdown("#### Evolución semanal de producción")
-        production_view = agent_data[["week", "production_weekly_closed", "production_weekly_effective"]].set_index("week")
-        st.line_chart(production_view)
-
-    st.markdown("#### Producción MTD vs semanal cerrada")
-    comparison = agent_data[["week", "production_mtd", "production_weekly_closed", "production_weekly_effective"]].set_index("week")
-    st.dataframe(comparison, use_container_width=True)
-
-    st.markdown("#### Histórico de red flags")
-    if agent_flags.empty:
-        st.info("Este agente no tiene red flags activas en el periodo procesado.")
-    else:
-        st.dataframe(agent_flags, use_container_width=True)
-
-    st.markdown("#### Traza completa del agente")
-    st.dataframe(agent_data, use_container_width=True)
-
+    agent_name = st.selectbox(
+        "Selecciona un agente",
+        options=sorted(weekly["agent_name"].dropna().unique().tolist()),
+    )
+    st.dataframe(
+        weekly[weekly["agent_name"] == agent_name].sort_values(["month", "week"]),
+        use_container_width=True,
+    )
+    st.dataframe(flags[flags["agent_name"] == agent_name], use_container_width=True)
 
 
 def render_reports() -> None:
@@ -343,89 +393,45 @@ def render_reports() -> None:
     if not results:
         st.info("Procesa archivos para habilitar reportes.")
         return
-
-    flags = results["flags"]
-    flagged = results["flagged_agents"]
-    weekly = results["weekly"]
-    monthly = results["monthly"]
-    summary = results["summary"]
     month_label = st.session_state.get("month_label", DEFAULT_MONTH)
     generated_by = st.session_state.get("generated_by", "operador")
-
-    excel_bytes = build_excel_report(
-        {
-            "flagged_agents": flagged,
-            "flags": flags,
-            "weekly": weekly,
-            "monthly": monthly,
-            "summary": summary,
-        }
+    excel_bytes = build_excel_report(results)
+    csv_bytes = dataframe_to_csv_bytes(results["summary"])
+    pdf_bytes = build_pdf_report(
+        results["flags"],
+        results["summary"],
+        month_label=month_label,
+        generated_by=generated_by,
     )
-    csv_bytes = dataframe_to_csv_bytes(flagged if not flagged.empty else summary)
-    pdf_bytes = build_pdf_report(flags, summary, month_label=month_label, generated_by=generated_by)
-
-    d1, d2, d3 = st.columns(3)
-    with d1:
-        st.download_button(
-            label="Descargar reporte CSV",
-            data=csv_bytes,
-            file_name=f"red_flags_{month_label}.csv",
-            mime="text/csv",
-        )
-    with d2:
-        st.download_button(
-            label="Descargar reporte Excel",
-            data=excel_bytes,
-            file_name=f"red_flags_{month_label}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-    with d3:
-        st.download_button(
-            label="Descargar reporte PDF",
-            data=pdf_bytes,
-            file_name=f"red_flags_{month_label}.pdf",
-            mime="application/pdf",
-        )
-
-    st.markdown("#### Vista previa del reporte")
-    st.dataframe(flagged if not flagged.empty else summary, use_container_width=True)
-
+    c1, c2, c3 = st.columns(3)
+    c1.download_button(
+        "Descargar CSV",
+        data=csv_bytes,
+        file_name=f"red_flags_{month_label}.csv",
+        mime="text/csv",
+    )
+    c2.download_button(
+        "Descargar Excel",
+        data=excel_bytes,
+        file_name=f"red_flags_{month_label}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    c3.download_button(
+        "Descargar PDF",
+        data=pdf_bytes,
+        file_name=f"red_flags_{month_label}.pdf",
+        mime="application/pdf",
+    )
 
 
 def render_history() -> None:
     st.subheader("Histórico y auditoría")
-    audit_log = load_audit_log()
-    if audit_log.empty:
-        st.info("Todavía no hay corridas persistidas en data/history.")
-        return
-    st.dataframe(audit_log.sort_values("timestamp", ascending=False), use_container_width=True)
-
-
-
-def render_notes() -> None:
-    with st.expander("Notas del MVP", expanded=False):
-        st.markdown(
-            """
-            - Soporta archivos **long** y **wide** para producción y citas.
-            - Convierte producción **MTD** a producción semanal cerrada.
-            - Permite una **semana abierta** donde la producción efectiva usa el MTD actual como parcial.
-            - Las reglas iniciales implementadas son RF-001, RF-002 y RF-003.
-            - Guarda trazabilidad local en `data/history` y `data/audit_log.csv`.
-            - El mapeo de columnas se hace en UI para tolerar cambios en el orden o nombre de columnas.
-            """
-        )
-
+    st.dataframe(load_audit_log(), use_container_width=True)
 
 
 def main() -> None:
     st.title(APP_TITLE)
-    st.caption(
-        "MVP para cruzar producción vs citas, detectar agentes sospechosos y exportar reportes operativos."
-    )
-    render_notes()
-
     config = build_threshold_config()
-
     tabs = st.tabs(["Carga", "Dashboard", "Detalle", "Reportes", "Histórico"])
     with tabs[0]:
         render_upload_and_process(config)
