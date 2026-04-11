@@ -29,108 +29,48 @@ def build_excel_report(sheets: Dict[str, pd.DataFrame]) -> bytes:
     return buffer.read()
 
 
-def build_pdf_report(
-    flagged_agents: pd.DataFrame,
-    summary: pd.DataFrame,
-    month_label: str,
-    generated_by: str,
-) -> bytes:
+def _section_table(title: str, frame: pd.DataFrame, story: list, styles) -> None:
+    story.append(Paragraph(title, styles["Heading2"]))
+    story.append(Spacer(1, 6))
+    if frame.empty:
+        story.append(Paragraph("Sin casos.", styles["BodyText"]))
+        story.append(Spacer(1, 8))
+        return
+    cols = [c for c in ["agent_name", "hierarchy", "appointments_month_total", "production_monthly_total", "active_flags", "inclusion_reason"] if c in frame.columns]
+    rows = [cols] + frame[cols].astype(str).values.tolist()
+    table = Table(rows, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("PADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(table)
+    story.append(Spacer(1, 10))
+
+
+def build_pdf_report(final_monitoring: pd.DataFrame, flags: pd.DataFrame, month_label: str, generated_by: str) -> bytes:
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buffer, pagesize=letter, title=f"Reporte Red Flags {month_label}"
-    )
+    doc = SimpleDocTemplate(buffer, pagesize=letter, title=f"Reporte Red Flags {month_label}")
     styles = getSampleStyleSheet()
-
-    story = []
-    story.append(Paragraph(f"Reporte de Red Flags - {month_label}", styles["Title"]))
-    story.append(Spacer(1, 12))
-    story.append(
-        Paragraph(
-            f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Usuario: {generated_by or 'N/D'}",
-            styles["BodyText"],
-        )
-    )
+    story = [Paragraph(f"Reporte Ejecutivo de Monitoreo - {month_label}", styles["Title"]), Spacer(1, 10)]
+    story.append(Paragraph(f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Usuario: {generated_by or 'N/D'}", styles["BodyText"]))
     story.append(Spacer(1, 12))
 
-    kpis = [
-        [
-            "Total agentes",
-            str(
-                summary["agent_key"].nunique() if "agent_key" in summary.columns else 0
-            ),
-        ],
-        [
-            "Agentes con red flags",
-            str(
-                flagged_agents["agent_key"].nunique() if not flagged_agents.empty else 0
-            ),
-        ],
-        ["Red flags detectadas", str(len(flagged_agents))],
-        [
-            "Producción total",
-            f"{summary['production_monthly_total'].sum():,.2f}"
-            if "production_monthly_total" in summary.columns
-            else "0.00",
-        ],
-        [
-            "Citas totales",
-            f"{summary['appointments_month_total'].sum():,.2f}"
-            if "appointments_month_total" in summary.columns
-            else "0.00",
-        ],
-    ]
+    story.append(Paragraph("1. Executive Summary", styles["Heading2"]))
+    story.append(Paragraph(f"Casos finales en monitoreo: {len(final_monitoring)}. Flags totales detectadas: {len(flags)}.", styles["BodyText"]))
+    story.append(Spacer(1, 10))
 
-    kpi_table = Table([["KPI", "Valor"], *kpis], colWidths=[220, 120])
-    kpi_table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-                ("PADDING", (0, 0), (-1, -1), 6),
-            ]
-        )
-    )
-    story.append(kpi_table)
-    story.append(Spacer(1, 16))
+    critical_keys = set(flags[flags["flag_id"].isin(["RF-001", "RF-002"])]["agent_key"].tolist()) if not flags.empty else set()
+    weekly_keys = set(flags[flags["flag_id"] == "RF-003"]["agent_key"].tolist()) if not flags.empty else set()
+    obs_keys = set(flags[flags["flag_id"].astype(str).str.startswith("OBS")]["agent_key"].tolist()) if not flags.empty else set()
 
-    story.append(Paragraph("Agentes con red flags", styles["Heading2"]))
-    story.append(Spacer(1, 8))
-
-    if flagged_agents.empty:
-        story.append(
-            Paragraph(
-                "No se detectaron red flags para el periodo seleccionado.",
-                styles["BodyText"],
-            )
-        )
-    else:
-        preview = flagged_agents[
-            [
-                col
-                for col in [
-                    "agent_name",
-                    "hierarchy",
-                    "flag_name",
-                    "severity",
-                    "reason",
-                ]
-                if col in flagged_agents.columns
-            ]
-        ].head(25)
-        rows = [list(preview.columns)] + preview.astype(str).values.tolist()
-        table = Table(rows, repeatRows=1)
-        table.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#111827")),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-                    ("PADDING", (0, 0), (-1, -1), 4),
-                ]
-            )
-        )
-        story.append(table)
+    _section_table("2. Critical Red Flags", final_monitoring[final_monitoring["agent_key"].isin(critical_keys)], story, styles)
+    _section_table("3. Weekly Red Flags", final_monitoring[final_monitoring["agent_key"].isin(weekly_keys)], story, styles)
+    _section_table("4. Observation / Monitoring Cases", final_monitoring[final_monitoring["agent_key"].isin(obs_keys)], story, styles)
+    _section_table("5. Manually Included Agents", final_monitoring[final_monitoring["manual_include"]], story, styles)
+    story.append(Paragraph("6. Conclusion / Operational Recommendation", styles["Heading2"]))
+    story.append(Paragraph("Priorizar seguimiento en casos críticos y reforzar control de citas en agentes observados.", styles["BodyText"]))
 
     doc.build(story)
     buffer.seek(0)

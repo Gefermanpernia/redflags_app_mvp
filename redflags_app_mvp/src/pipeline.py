@@ -15,7 +15,7 @@ def run_pipeline(
     config: ThresholdConfig,
     alias_mapping: dict[str, str] | None = None,
 ) -> Dict[str, pd.DataFrame]:
-    weekly = build_weekly_dataset(
+    weekly, conflicts = build_weekly_dataset(
         raw_production, raw_appointments, config, alias_mapping=alias_mapping
     )
     monthly = build_monthly_dataset(weekly)
@@ -37,4 +37,5 @@ def run_pipeline(
         "flags": flags,
         "summary": summary,
         "flagged_agents": flagged_agents,
+        "conflicts": conflicts,
     }

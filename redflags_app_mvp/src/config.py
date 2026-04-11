@@ -1,19 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
-from typing import Dict, Any
+from dataclasses import asdict, dataclass
+from typing import Any, Dict
 
 
 @dataclass
 class ThresholdConfig:
     monthly_production_suspicious: float = 1500.0
     weekly_production_suspicious: float = 1500.0
+    weekly_production_strict: float = 2000.0
+    weekly_observation_threshold: float = 1000.0
     spike_last_week_threshold: float = 3000.0
     few_appointments_threshold: float = 1.0
     insignificant_production_threshold: float = 100.0
     severity_rule_a: str = "alta"
     severity_rule_b: str = "alta"
     severity_rule_c: str = "media-alta"
+    severity_observation: str = "baja"
     use_open_week_partial: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
@@ -24,16 +27,20 @@ DEFAULT_THRESHOLDS = ThresholdConfig()
 
 REQUIRED_PRODUCTION_LONG = {
     "agent_name": "Nombre del agente",
+    "agent_code": "Código agente (opcional)",
     "hierarchy": "Jerarquía (opcional)",
     "week": "Semana",
+    "snapshot_date": "Fecha de snapshot (opcional)",
     "production_mtd": "Producción MTD",
     "month": "Mes (opcional si se define arriba)",
 }
 
 REQUIRED_PRODUCTION_WIDE = {
     "agent_name": "Nombre del agente",
+    "agent_code": "Código agente (opcional)",
     "hierarchy": "Jerarquía (opcional)",
     "month": "Mes (opcional si se define arriba)",
+    "snapshot_date": "Fecha de snapshot (opcional)",
     "mtd_week_1": "MTD semana 1",
     "mtd_week_2": "MTD semana 2 (opcional)",
     "mtd_week_3": "MTD semana 3 (opcional)",
@@ -43,6 +50,7 @@ REQUIRED_PRODUCTION_WIDE = {
 
 REQUIRED_APPOINTMENTS_LONG = {
     "agent_name": "Nombre del agente",
+    "agent_code": "Código agente (opcional)",
     "hierarchy": "Jerarquía (opcional)",
     "week": "Semana",
     "appointments": "Citas",
@@ -51,6 +59,7 @@ REQUIRED_APPOINTMENTS_LONG = {
 
 REQUIRED_APPOINTMENTS_WIDE = {
     "agent_name": "Nombre del agente",
+    "agent_code": "Código agente (opcional)",
     "hierarchy": "Jerarquía (opcional)",
     "month": "Mes (opcional si se define arriba)",
     "appointments_week_1": "Citas semana 1",

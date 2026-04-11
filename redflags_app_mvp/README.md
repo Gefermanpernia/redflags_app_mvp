@@ -1,37 +1,73 @@
-# Red Flags App MVP v1.1
+# Red Flags App MVP v2.0
 
-Evolución del MVP a una versión operable para producción ligera, manteniendo flujo Streamlit.
+Aplicación Streamlit para ingestión de Excel (producción MTD + citas), cálculo de métricas semanales/mensuales, detección de red flags, dashboard de monitoreo y generación de PDF ejecutivo.
 
-## Novedades v1.1
+## Cambios principales v2.0
 
-- Validaciones de calidad por hoja y dataset.
-- Bloqueo de procesamiento cuando hay meses mezclados en una misma hoja.
-- Resumen de calidad en UI.
-- Matching de agentes con alias configurables vía CSV (`alias,canonical`).
-- Score de riesgo `risk_score` (0-100) agregado a flags y summary.
-- Dashboard con filtros por mes/semana/jerarquía/severidad/tipo de bandera.
-- KPIs por jerarquía y priorización de sospechosos por riesgo.
-- Persistencia migrada a SQLite + SQLAlchemy con trazabilidad de archivo/hoja/usuario.
-- DX: `Makefile`, `ruff`, tests ampliados.
+- **Identidad canónica de agente**: matching por `agent_code` (si existe) o nombre normalizado; la jerarquía ya no participa en la llave de identidad.
+- **Normalización robusta de nombres**: trim, lower, eliminación de acentos y puntuación, compresión de espacios.
+- **Dedupe durable**:
+  - Producción: dedupe por agente canónico + mes + semana + snapshot, sin sumar duplicados por hojas.
+  - Citas: dedupe por agente canónico + mes + semana con política determinista (máximo) y conflicto auditado.
+- **Derivación semanal desde MTD**: `weekly = mtd_actual - mtd_semana_previa`.
+- **Conflictos de importación**: visibles en dashboard (no se suman ciegamente).
+- **Overrides manuales**:
+  - inclusión manual,
+  - exclusión/exención manual por mes,
+  - trazabilidad (razón, usuario, timestamp).
+- **Conjunto final de monitoreo**:
+  - `final = (auto_red_flags ∪ manual_include) - manual_exclude`.
+- **PDF ejecutivo** usando el conjunto final (no solo auto red flags), con secciones de críticos, semanales, observación e inclusiones manuales.
+- **Persistencia SQLite** de overrides y trazabilidad de corrida/importación.
 
-## Fórmula de riesgo
+## Flujo de importación
 
-`risk_score = puntos_regla + puntos_severidad + intensidad_métrica`, limitado entre 0 y 100.
+1. Subir Excel de Producción y Excel de Citas.
+2. Seleccionar tipo de layout (`long` o `wide`).
+3. Seleccionar hojas a procesar por archivo.
+4. Mapear columnas detectadas (incluye soporte opcional de `agent_code` y `snapshot_date`).
+5. Validar y procesar.
+6. Revisar dashboard + conflictos + overrides manuales.
+7. Revisar lista final previa a PDF y descargar reporte.
 
-- `puntos_regla`: RF-001=25, RF-002=30, RF-003=20.
-- `puntos_severidad`: baja=5, media=12, media-alta=18, alta=25, crítica=35.
-- `intensidad_métrica`: escala por cuánto excede cada umbral por regla.
+## Formato recomendado (v2)
 
-## Uso rápido
+### Producción
+Columnas recomendadas:
+- `snapshot_date` (YYYY-MM-DD)
+- `report_month` (`YYYY-MM`)
+- `agent_name`
+- `agent_code` (recomendado)
+- `hierarchy`
+- `mtd_gross_production` / `production_mtd`
+
+### Citas
+Columnas recomendadas:
+- `report_month` (`YYYY-MM`)
+- `week_start_date`
+- `week_end_date`
+- `agent_name`
+- `agent_code` (recomendado)
+- `hierarchy`
+- `appointment_count` / `appointments`
+
+## Legacy support
+
+Se mantienen cargas legacy con múltiples hojas como:
+- producción: `produccion de gerentes abril`, `vip produccion`
+- citas: `reporte de citas abril`
+
+Siempre que se seleccionen y mapeen columnas en UI.
+
+## Ejecutar localmente
 
 ```bash
 make install
 make run
 ```
 
-## Calidad y pruebas
+## Pruebas
 
 ```bash
-make lint
 make test
 ```
