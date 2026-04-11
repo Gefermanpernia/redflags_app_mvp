@@ -1,35 +1,62 @@
-# Red Flags App MVP v1.1
+# Red Flags App MVP v2.0
 
-Evolución del MVP a una versión operable para producción ligera, manteniendo flujo Streamlit.
+Aplicación Streamlit para ingestión de Excel (producción MTD + citas), cálculo semanal/mensual, detección de red flags y generación de reportes PDF ejecutivos.
 
-## Novedades v1.1
+## Arquitectura actual
 
-- Validaciones de calidad por hoja y dataset.
-- Bloqueo de procesamiento cuando hay meses mezclados en una misma hoja.
-- Resumen de calidad en UI.
-- Matching de agentes con alias configurables vía CSV (`alias,canonical`).
-- Score de riesgo `risk_score` (0-100) agregado a flags y summary.
-- Dashboard con filtros por mes/semana/jerarquía/severidad/tipo de bandera.
-- KPIs por jerarquía y priorización de sospechosos por riesgo.
-- Persistencia migrada a SQLite + SQLAlchemy con trazabilidad de archivo/hoja/usuario.
-- DX: `Makefile`, `ruff`, tests ampliados.
+- `app.py`: UI de carga, validación, dashboard, overrides manuales, y exportables.
+- `src/parsers.py`: lectura de hojas Excel, mapeo de columnas y deduplicación determinística por agente canónico.
+- `src/normalization.py`: normalización de identidad (`agent_code` preferido, fallback por nombre normalizado).
+- `src/metrics.py`: derivación de producción semanal desde snapshots MTD y dataset consolidado semanal/mensual.
+- `src/red_flags.py`: motor configurable de flags (mensual, semanal, pico final, observación).
+- `src/pipeline.py`: unión de métricas + flags + lógica final de monitoreo con includes/excludes.
+- `src/persistence.py`: auditoría de corridas, conflictos de importación y overrides manuales en SQLite.
+- `src/reports.py`: exportación CSV/Excel y PDF ejecutivo basado en `final_monitoring_set`.
 
-## Fórmula de riesgo
+## Reglas de identidad y dedupe
 
-`risk_score = puntos_regla + puntos_severidad + intensidad_métrica`, limitado entre 0 y 100.
+1. Identidad canónica:
+   - Si existe `agent_code`, se usa como key (`CODE::<code>`).
+   - Si no existe, se usa nombre normalizado (`NAME::<normalized_name>`).
+   - Jerarquía **no** participa en identidad.
+2. Producción (mismo agente + mes + snapshot + semana):
+   - valores idénticos => se conserva uno
+   - si uno tiene neta y otro no => se conserva el más rico
+   - conflicto de valores => no se suman; se conserva política determinística y se registra conflicto
+3. Citas (mismo agente + mes + semana):
+   - null vs número => gana número
+   - iguales => se conserva uno
+   - conflicto no-nulo => política `max_appointments` + warning de conflicto
 
-- `puntos_regla`: RF-001=25, RF-002=30, RF-003=20.
-- `puntos_severidad`: baja=5, media=12, media-alta=18, alta=25, crítica=35.
-- `intensidad_métrica`: escala por cuánto excede cada umbral por regla.
+## Flujo de importación
 
-## Uso rápido
+1. Subir archivo
+2. Elegir formato (long/wide) y hojas
+3. Mapear columnas
+4. Validar
+5. Procesar + dedupe + auditoría + conflictos
+
+Soporte legacy preseleccionado:
+- Producción: `produccion de gerentes abril`, `vip produccion`
+- Citas: `reporte de citas abril`
+
+## Monitoreo final y overrides
+
+La regla implementada:
+
+`final_monitoring_set = (auto_red_flagged_agents UNION manually_included_agents) MINUS manually_excluded_agents`
+
+- Includes/excludes se guardan con razón, timestamp, usuario y mes.
+- El PDF se genera desde la selección final editable en UI.
+
+## Ejecución local
 
 ```bash
 make install
 make run
 ```
 
-## Calidad y pruebas
+## Calidad
 
 ```bash
 make lint

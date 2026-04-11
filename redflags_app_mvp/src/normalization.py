@@ -32,6 +32,11 @@ def normalize_hierarchy(value: Any) -> str:
     return normalize_text(value)
 
 
+def normalize_agent_code(value: Any) -> str:
+    normalized = normalize_text(value)
+    return normalized.replace(" ", "")
+
+
 def load_alias_mapping(csv_path: str | Path | None) -> dict[str, str]:
     if not csv_path:
         return {}
@@ -68,8 +73,13 @@ def resolve_alias(name: Any, alias_mapping: dict[str, str] | None = None) -> str
 
 
 def build_agent_key(
-    agent_name: Any, hierarchy: Any = "", alias_mapping: dict[str, str] | None = None
+    agent_name: Any,
+    hierarchy: Any = "",
+    alias_mapping: dict[str, str] | None = None,
+    agent_code: Any = None,
 ) -> str:
-    return (
-        f"{resolve_alias(agent_name, alias_mapping)}::{normalize_hierarchy(hierarchy)}"
-    )
+    del hierarchy  # hierarchy is explicitly not part of canonical identity
+    normalized_code = normalize_agent_code(agent_code)
+    if normalized_code:
+        return f"CODE::{normalized_code}"
+    return f"NAME::{resolve_alias(agent_name, alias_mapping)}"
