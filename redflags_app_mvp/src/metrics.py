@@ -219,14 +219,65 @@ def prepare_appointments_data(
     return appt[APPOINTMENT_COLUMNS], conflicts_df
 
 
+def merge_appointment_sources(
+    excel_appointments: pd.DataFrame,
+    manual_appointments: pd.DataFrame | None,
+    merge_rule: str = "overwrite",
+) -> pd.DataFrame:
+    if manual_appointments is None or manual_appointments.empty:
+        return excel_appointments
+    if excel_appointments.empty:
+        merged = manual_appointments.copy()
+        merged["appointments_month_total"] = merged.groupby(["month", "agent_key"])["appointments"].transform("sum")
+        return merged[APPOINTMENT_COLUMNS]
+
+    excel = excel_appointments.copy()
+    manual = manual_appointments.copy()
+    excel["source_type"] = "excel"
+    manual["source_type"] = "manual"
+
+    combined = pd.concat([excel, manual], ignore_index=True)
+    if merge_rule == "sum":
+        grouped = (
+            combined.groupby(["month", "week", "agent_key"], as_index=False)
+            .agg(
+                agent_name=("agent_name", _first_non_empty),
+                hierarchy=("hierarchy", _first_non_empty),
+                hierarchies_detected=("hierarchies_detected", _join_unique),
+                agent_code=("agent_code", _first_non_empty),
+                appointments=("appointments", "sum"),
+                source_sheet=("source_sheet", _join_unique),
+            )
+            .sort_values(["month", "agent_key", "week"])
+        )
+    else:
+        combined["_priority"] = combined["source_type"].map({"excel": 1, "manual": 2}).fillna(0)
+        winner_rows = (
+            combined.sort_values(["month", "week", "agent_key", "_priority"])
+            .groupby(["month", "week", "agent_key"], as_index=False)
+            .tail(1)
+        )
+        grouped = winner_rows.drop(columns=["source_type", "_priority"]).sort_values(["month", "agent_key", "week"])
+
+    grouped["appointments_month_total"] = grouped.groupby(["month", "agent_key"])["appointments"].transform("sum")
+    return grouped[APPOINTMENT_COLUMNS]
+
+
 def build_weekly_dataset(
     production_df: pd.DataFrame,
     appointments_df: pd.DataFrame,
     config: ThresholdConfig,
+    manual_appointments_df: pd.DataFrame | None = None,
+    appointments_merge_rule: str = "overwrite",
     alias_mapping: dict[str, str] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     prod, prod_conflicts = prepare_production_data(production_df, config, alias_mapping=alias_mapping)
     appt, appt_conflicts = prepare_appointments_data(appointments_df, alias_mapping=alias_mapping)
+    manual_appt, manual_conflicts = prepare_appointments_data(
+        manual_appointments_df if manual_appointments_df is not None else pd.DataFrame(),
+        alias_mapping=alias_mapping,
+    )
+    appt = merge_appointment_sources(appt, manual_appt, merge_rule=appointments_merge_rule)
 
     weekly = pd.merge(
         prod,
@@ -276,7 +327,7 @@ def build_weekly_dataset(
 
     weekly["appointments_month_total"] = weekly.groupby(["month", "agent_key"])["appointments"].transform("sum")
     weekly["production_monthly_total"] = weekly.groupby(["month", "agent_key"])["production_mtd"].transform("max")
-    conflicts = pd.concat([prod_conflicts, appt_conflicts], ignore_index=True)
+    conflicts = pd.concat([prod_conflicts, appt_conflicts, manual_conflicts], ignore_index=True)
     return weekly, conflicts
 
 

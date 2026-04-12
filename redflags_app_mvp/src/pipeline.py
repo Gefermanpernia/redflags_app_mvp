@@ -13,10 +13,17 @@ def run_pipeline(
     raw_production: pd.DataFrame,
     raw_appointments: pd.DataFrame,
     config: ThresholdConfig,
+    manual_appointments: pd.DataFrame | None = None,
+    appointments_merge_rule: str = "overwrite",
     alias_mapping: dict[str, str] | None = None,
 ) -> Dict[str, pd.DataFrame]:
     weekly, conflicts = build_weekly_dataset(
-        raw_production, raw_appointments, config, alias_mapping=alias_mapping
+        raw_production,
+        raw_appointments,
+        config,
+        manual_appointments_df=manual_appointments,
+        appointments_merge_rule=appointments_merge_rule,
+        alias_mapping=alias_mapping,
     )
     monthly = build_monthly_dataset(weekly)
     flags = evaluate_red_flags(weekly, monthly, config)
