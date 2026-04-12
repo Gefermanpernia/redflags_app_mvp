@@ -23,6 +23,7 @@ def _init_db() -> None:
                     timestamp TEXT NOT NULL,
                     month_label TEXT NOT NULL,
                     generated_by TEXT NOT NULL,
+                    source_mode TEXT NOT NULL DEFAULT 'weekly_detail',
                     production_file_name TEXT,
                     appointments_file_name TEXT,
                     raw_production_rows INTEGER,
@@ -33,6 +34,14 @@ def _init_db() -> None:
                 """
             )
         )
+        columns = conn.execute(text("PRAGMA table_info(run_audit)")).fetchall()
+        column_names = {row[1] for row in columns}
+        if "source_mode" not in column_names:
+            conn.execute(
+                text(
+                    "ALTER TABLE run_audit ADD COLUMN source_mode TEXT NOT NULL DEFAULT 'weekly_detail'"
+                )
+            )
         conn.execute(
             text(
                 """
@@ -56,6 +65,7 @@ def persist_run(
     *,
     month_label: str,
     generated_by: str,
+    source_mode: str,
     production_file_name: str,
     appointments_file_name: str,
     raw_production: pd.DataFrame,
@@ -72,9 +82,9 @@ def persist_run(
             text(
                 """
                 INSERT INTO run_audit
-                (timestamp, month_label, generated_by, production_file_name, appointments_file_name,
+                (timestamp, month_label, generated_by, source_mode, production_file_name, appointments_file_name,
                  raw_production_rows, raw_appointments_rows, weekly_rows, flags_rows)
-                VALUES (:timestamp, :month_label, :generated_by, :production_file_name, :appointments_file_name,
+                VALUES (:timestamp, :month_label, :generated_by, :source_mode, :production_file_name, :appointments_file_name,
                         :raw_production_rows, :raw_appointments_rows, :weekly_rows, :flags_rows)
                 """
             ),
@@ -82,6 +92,7 @@ def persist_run(
                 "timestamp": timestamp,
                 "month_label": month_label,
                 "generated_by": generated_by,
+                "source_mode": source_mode,
                 "production_file_name": production_file_name,
                 "appointments_file_name": appointments_file_name,
                 "raw_production_rows": len(raw_production),

@@ -8,6 +8,11 @@ from src.config import ThresholdConfig
 from src.data_quality import detect_mixed_months
 from src.metrics import build_monthly_dataset, build_weekly_dataset
 from src.normalization import build_agent_key, load_alias_mapping, normalize_name
+from src.parsers import (
+    SOURCE_MODE_MONTHLY_AUDIT,
+    SOURCE_MODE_WEEKLY_DETAIL,
+    filter_frames_by_source_mode,
+)
 from src.red_flags import compute_risk_score, evaluate_red_flags
 
 
@@ -170,3 +175,16 @@ def test_detect_mixed_months_by_sheet() -> None:
     )
     errors = detect_mixed_months(frame, "Producción")
     assert errors
+
+
+def test_filter_frames_by_source_mode_uses_expected_sheet() -> None:
+    frames = {
+        "reporte de citas abril": pd.DataFrame([{"x": 1}]),
+        "AUDITORIA": pd.DataFrame([{"x": 2}]),
+        "OTRA": pd.DataFrame([{"x": 3}]),
+    }
+    weekly_filtered = filter_frames_by_source_mode(frames, SOURCE_MODE_WEEKLY_DETAIL)
+    monthly_filtered = filter_frames_by_source_mode(frames, SOURCE_MODE_MONTHLY_AUDIT)
+
+    assert list(weekly_filtered.keys()) == ["reporte de citas abril"]
+    assert list(monthly_filtered.keys()) == ["AUDITORIA"]

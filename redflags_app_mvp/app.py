@@ -21,6 +21,9 @@ from src.data_quality import (
 )
 from src.normalization import load_alias_mapping
 from src.parsers import (
+    SOURCE_MODE_MONTHLY_AUDIT,
+    SOURCE_MODE_WEEKLY_DETAIL,
+    filter_frames_by_source_mode,
     load_excel_sheets,
     load_selected_frames,
     parse_appointments_frames,
@@ -156,6 +159,27 @@ def render_upload_and_process(config: ThresholdConfig) -> None:
 
     with col2:
         st.markdown("### Citas")
+        selected_source_modes = st.multiselect(
+            "source_mode",
+            options=[SOURCE_MODE_WEEKLY_DETAIL, SOURCE_MODE_MONTHLY_AUDIT],
+            default=[SOURCE_MODE_WEEKLY_DETAIL],
+            help="Define qué origen de citas usar para el procesamiento.",
+            key="source_mode",
+        )
+        source_mode = (
+            selected_source_modes[0]
+            if len(selected_source_modes) == 1
+            else SOURCE_MODE_WEEKLY_DETAIL
+        )
+        if len(selected_source_modes) > 1:
+            st.warning(
+                "Seleccionaste ambos source_mode. Debes definir una prioridad explícita."
+            )
+            source_mode = st.radio(
+                "Prioridad source_mode",
+                options=[SOURCE_MODE_WEEKLY_DETAIL, SOURCE_MODE_MONTHLY_AUDIT],
+                key="source_mode_priority",
+            )
         appointments_file = st.file_uploader(
             "Sube Excel de citas", type=["xlsx", "xlsm", "xls"], key="appointments_file"
         )
@@ -202,6 +226,9 @@ def render_upload_and_process(config: ThresholdConfig) -> None:
         if production_file is None or appointments_file is None:
             st.error("Debes subir ambos archivos: producción y citas.")
             return
+        if not selected_source_modes:
+            st.error("Debes seleccionar al menos un source_mode.")
+            return
 
         errors = []
         errors += (
@@ -235,8 +262,21 @@ def render_upload_and_process(config: ThresholdConfig) -> None:
             layout=production_layout,
             fallback_month=st.session_state["month_label"],
         )
+        filtered_appointments_frames = filter_frames_by_source_mode(
+            appointments_frames, source_mode
+        )
+        if not filtered_appointments_frames:
+            expected_sheet = (
+                "reporte de citas abril"
+                if source_mode == SOURCE_MODE_WEEKLY_DETAIL
+                else "AUDITORIA"
+            )
+            st.error(
+                f"No se encontró la hoja requerida para source_mode={source_mode}: {expected_sheet}."
+            )
+            return
         raw_appointments = parse_appointments_frames(
-            appointments_frames,
+            filtered_appointments_frames,
             appointments_mapping,
             layout=appointments_layout,
             fallback_month=st.session_state["month_label"],
@@ -260,6 +300,7 @@ def render_upload_and_process(config: ThresholdConfig) -> None:
         run_id = persist_run(
             month_label=st.session_state["month_label"],
             generated_by=st.session_state["generated_by"],
+            source_mode=source_mode,
             production_file_name=getattr(production_file, "name", "production.xlsx"),
             appointments_file_name=getattr(
                 appointments_file, "name", "appointments.xlsx"
