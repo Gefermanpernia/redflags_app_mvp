@@ -399,6 +399,70 @@ def load_operational_audit_log() -> pd.DataFrame:
     return pd.read_sql("SELECT * FROM operational_audit_log ORDER BY id DESC", ENGINE)
 
 
+def _week_of_month(date_value: str) -> int:
+    dt = pd.to_datetime(date_value, errors="coerce")
+    if pd.isna(dt):
+        return 1
+    return max(1, min(5, int(((dt.day - 1) // 7) + 1)))
+
+
+def load_agent_catalog() -> pd.DataFrame:
+    _init_db()
+    records = load_operational_records()
+    if records.empty:
+        return pd.DataFrame(columns=["agent_name", "agent_code"])
+    out = records[["agent_name"]].dropna().drop_duplicates().copy()
+    out["agent_code"] = ""
+    return out.sort_values(["agent_name"]).reset_index(drop=True)
+
+
+def save_appointment_daily_fact(
+    *,
+    agent_key: str,
+    agent_code: str,
+    agent_name: str,
+    appointment_date: str,
+    appointment_count: float,
+    source: str,
+    created_by: str,
+) -> None:
+    create_operational_record(
+        record_type="appointments",
+        agent_name=agent_name,
+        record_date=appointment_date,
+        amount=appointment_count,
+        load_type="diaria",
+        notes=f"agent_key={agent_key};agent_code={agent_code}",
+        source_origin=source,
+        source_detail="manual_daily_fact",
+        created_by=created_by,
+    )
+
+
+def load_appointment_daily_facts(month_label: str | None = None) -> pd.DataFrame:
+    records = load_operational_records(month_label)
+    if records.empty:
+        return pd.DataFrame()
+    records = records[(records["record_type"] == "appointments") & (records["source_origin"].isin(["manual", "csv"]))].copy()
+    return records.sort_values(["record_date", "id"], ascending=[False, False]).reset_index(drop=True)
+
+
+def load_manual_appointments_weekly(month_label: str) -> pd.DataFrame:
+    daily = load_appointment_daily_facts(month_label)
+    if daily.empty:
+        return pd.DataFrame(columns=["month", "week", "agent_name", "agent_code", "hierarchy", "appointments", "source_sheet"])
+    daily["week"] = daily["record_date"].apply(_week_of_month)
+    weekly = (
+        daily.groupby(["month_label", "week", "agent_name"], as_index=False)
+        .agg(appointments=("amount", "sum"))
+        .rename(columns={"month_label": "month"})
+    )
+    weekly["agent_code"] = ""
+    weekly["hierarchy"] = ""
+    weekly["source_sheet"] = "manual_daily_fact"
+    return weekly[["month", "week", "agent_name", "agent_code", "hierarchy", "appointments", "source_sheet"]]
+
+
 def save_monitoring_override(
     *, agent_key: str, report_month: str, action_type: str, reason: str, created_by: str
 ) -> None:

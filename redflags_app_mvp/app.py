@@ -19,7 +19,7 @@ from src.data_quality import (
     detect_mixed_months,
     validate_sheet_columns,
 )
-from src.normalization import load_alias_mapping
+from src.normalization import build_agent_key, load_alias_mapping
 from src.parsers import (
     SOURCE_MODE_MONTHLY_AUDIT,
     SOURCE_MODE_WEEKLY_DETAIL,
@@ -34,11 +34,15 @@ from src.monitoring import build_final_monitoring_set
 from src.persistence import (
     create_operational_record,
     delete_operational_record,
+    load_agent_catalog,
+    load_appointment_daily_facts,
     load_audit_log,
+    load_manual_appointments_weekly,
     load_monitoring_overrides,
     load_operational_audit_log,
     load_unified_operational_dataset,
     persist_run,
+    save_appointment_daily_fact,
     save_monitoring_override,
     update_operational_record,
 )
@@ -121,10 +125,17 @@ def build_threshold_config() -> ThresholdConfig:
             "Usar semana actual abierta como MTD parcial",
             value=DEFAULT_THRESHOLDS.use_open_week_partial,
         )
+        appointments_merge_rule = st.selectbox(
+            "Regla de combinación citas (Excel + carga manual)",
+            options=["overwrite", "sum"],
+            format_func=lambda value: "Manual sobreescribe Excel" if value == "overwrite" else "Manual + Excel (sumar)",
+            index=0,
+        )
 
     st.session_state["generated_by"] = generated_by
     st.session_state["month_label"] = month_label
     st.session_state["alias_file"] = alias_file
+    st.session_state["appointments_merge_rule"] = appointments_merge_rule
     return ThresholdConfig(
         monthly_production_suspicious=monthly_threshold,
         weekly_production_suspicious=weekly_threshold,
@@ -312,8 +323,14 @@ def render_upload_and_process(config: ThresholdConfig) -> None:
             return
 
         alias_mapping = load_alias_mapping(st.session_state.get("alias_file"))
+        manual_appointments = load_manual_appointments_weekly(st.session_state["month_label"])
         results = run_pipeline(
-            raw_production, raw_appointments, config, alias_mapping=alias_mapping
+            raw_production,
+            raw_appointments,
+            config,
+            alias_mapping=alias_mapping,
+            manual_appointments=manual_appointments,
+            appointments_merge_rule=st.session_state.get("appointments_merge_rule", "overwrite"),
         )
         run_id = persist_run(
             month_label=st.session_state["month_label"],
@@ -447,6 +464,50 @@ def render_operational_registry() -> None:
     if c_del.button("Eliminar registro", use_container_width=True):
         delete_operational_record(record_id=int(selected_id), performed_by=generated_by)
         st.success("Registro eliminado")
+
+
+def render_manual_load() -> None:
+    st.subheader("Carga manual")
+    generated_by = st.session_state.get("generated_by", "operador")
+    default_month_date = datetime.now().replace(day=1).date()
+    month_date = st.date_input("Mes de trabajo", value=default_month_date, format="YYYY/MM/DD", key="manual_month_date")
+    selected_month = pd.Timestamp(month_date).strftime("%Y-%m")
+
+    catalog = load_agent_catalog()
+    labels = [row.agent_name for _, row in catalog.iterrows()] if not catalog.empty else []
+    selected_label = st.selectbox("Agente (catálogo)", options=[""] + labels)
+
+    selected_row = None
+    if selected_label and not catalog.empty:
+        selected_row = catalog.iloc[labels.index(selected_label)]
+
+    agent_name = st.text_input("Nombre de agente", value=selected_row["agent_name"] if selected_row is not None else "", key="manual_agent_name")
+    agent_code = st.text_input("Código de agente (opcional)", value=selected_row["agent_code"] if selected_row is not None and "agent_code" in selected_row else "", key="manual_agent_code")
+    appointment_date = st.date_input("Fecha del día", value=datetime.now().date(), key="manual_appointment_date")
+    appointment_count = st.number_input("Cantidad de citas", min_value=0.0, step=1.0, key="manual_appointment_count")
+
+    if st.button("Guardar", type="primary", key="manual_save"):
+        if not agent_name.strip():
+            st.error("Debes indicar un agente.")
+            return
+        agent_key = build_agent_key(agent_name=agent_name, hierarchy="", agent_code=agent_code)
+        save_appointment_daily_fact(
+            agent_key=agent_key,
+            agent_code=agent_code,
+            agent_name=agent_name,
+            appointment_date=pd.Timestamp(appointment_date).strftime("%Y-%m-%d"),
+            appointment_count=float(appointment_count),
+            source="manual",
+            created_by=generated_by,
+        )
+        st.success("Carga manual guardada correctamente.")
+
+    st.markdown("#### Detalle diario para auditoría")
+    daily = load_appointment_daily_facts(month_label=selected_month)
+    if daily.empty:
+        st.info("No hay registros manuales en el mes seleccionado.")
+    else:
+        st.dataframe(daily, use_container_width=True)
 
 
 def render_dashboard() -> None:
@@ -663,18 +724,20 @@ def render_history() -> None:
 def main() -> None:
     st.title(APP_TITLE)
     config = build_threshold_config()
-    tabs = st.tabs(["Carga", "Registro operativo", "Dashboard", "Detalle", "Reportes", "Histórico"])
+    tabs = st.tabs(["Carga", "Carga manual", "Registro operativo", "Dashboard", "Detalle", "Reportes", "Histórico"])
     with tabs[0]:
         render_upload_and_process(config)
     with tabs[1]:
-        render_operational_registry()
+        render_manual_load()
     with tabs[2]:
-        render_dashboard()
+        render_operational_registry()
     with tabs[3]:
-        render_agent_detail()
+        render_dashboard()
     with tabs[4]:
-        render_reports()
+        render_agent_detail()
     with tabs[5]:
+        render_reports()
+    with tabs[6]:
         render_history()
 
 
