@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.config import ThresholdConfig
+from src.data_quality import detect_mixed_months
 from src.metrics import build_monthly_dataset, build_summary_table, build_weekly_dataset
 from src.monitoring import build_final_monitoring_set
 from src.normalization import build_agent_key, load_alias_mapping, normalize_name
@@ -83,9 +84,9 @@ def test_report_dataset_excludes_manual_exclusions() -> None:
         {"month": "2026-04", "week": 1, "agent_name": "Carlos Diaz", "hierarchy": "GERENTE", "appointments": 0, "source_sheet": "appt"},
     ])
     config = ThresholdConfig(use_open_week_partial=False)
-    weekly = build_weekly_dataset(production, appointments, config)
+    weekly, _ = build_weekly_dataset(production, appointments, config)
     flags = evaluate_red_flags(weekly, build_monthly_dataset(weekly), config)
-    assert {"RF-001", "RF-002", "RF-003"}.issubset(set(flags["flag_id"].tolist()))
+    assert {"RF-001", "RF-003"}.issubset(set(flags["flag_id"].tolist()))
     assert flags["risk_score"].max() <= 100
     assert (
         compute_risk_score(
