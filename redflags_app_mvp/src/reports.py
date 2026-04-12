@@ -49,7 +49,7 @@ def _section_table(title: str, frame: pd.DataFrame, story: list, styles) -> None
     story.append(Spacer(1, 10))
 
 
-def build_pdf_report(final_monitoring: pd.DataFrame, flags: pd.DataFrame, month_label: str, generated_by: str) -> bytes:
+def build_pdf_report(final_monitoring: pd.DataFrame, flags: pd.DataFrame, month_label: str, generated_by: str, unified_operational: pd.DataFrame | None = None) -> bytes:
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, title=f"Reporte Red Flags {month_label}")
     styles = getSampleStyleSheet()
@@ -69,7 +69,22 @@ def build_pdf_report(final_monitoring: pd.DataFrame, flags: pd.DataFrame, month_
     _section_table("3. Weekly Red Flags", final_monitoring[final_monitoring["agent_key"].isin(weekly_keys)], story, styles)
     _section_table("4. Observation / Monitoring Cases", final_monitoring[final_monitoring["agent_key"].isin(obs_keys)], story, styles)
     _section_table("5. Manually Included Agents", final_monitoring[final_monitoring["manual_include"]], story, styles)
-    story.append(Paragraph("6. Conclusion / Operational Recommendation", styles["Heading2"]))
+    story.append(Paragraph("6. Dataset operativo unificado", styles["Heading2"]))
+    if unified_operational is None or unified_operational.empty:
+        story.append(Paragraph("Sin registros operativos unificados en el período.", styles["BodyText"]))
+    else:
+        ops = unified_operational.groupby(["record_type", "source_origin"], as_index=False).agg(registros=("id", "count"), monto_total=("amount", "sum"))
+        rows = [["record_type", "source_origin", "registros", "monto_total"]] + ops.astype(str).values.tolist()
+        ops_table = Table(rows, repeatRows=1)
+        ops_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f766e")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+            ("PADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(ops_table)
+    story.append(Spacer(1, 10))
+    story.append(Paragraph("7. Conclusion / Operational Recommendation", styles["Heading2"]))
     story.append(Paragraph("Priorizar seguimiento en casos críticos y reforzar control de citas en agentes observados.", styles["BodyText"]))
 
     doc.build(story)
