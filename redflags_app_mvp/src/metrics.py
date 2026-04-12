@@ -38,6 +38,14 @@ APPOINTMENT_COLUMNS = [
     "source_sheet",
 ]
 
+PRODUCTION_FACT_REQUIRED_COLUMNS = {
+    "agent_key",
+    "production_date",
+    "granularity",
+    "production_amount",
+    "source",
+}
+
 
 def _first_non_empty(values: Iterable[str]) -> str:
     for value in values:
@@ -63,6 +71,110 @@ def _build_conflict(kind: str, row: pd.Series, details: str) -> dict:
     }
 
 
+def _has_production_fact_shape(df: pd.DataFrame) -> bool:
+    return PRODUCTION_FACT_REQUIRED_COLUMNS.issubset(set(df.columns))
+
+
+def _week_of_month(value: pd.Timestamp) -> int:
+    return ((value.day - 1) // 7) + 1
+
+
+def _resolve_production_fact_conflicts(prod: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]]:
+    conflict_rows: list[dict] = []
+    deduped_rows = []
+    prod = prod.reset_index(drop=False).rename(columns={"index": "_ingest_order"})
+    key_cols = ["report_month", "agent_key", "production_date"]
+    for _, group in prod.groupby(key_cols, dropna=False):
+        if len(group) == 1:
+            deduped_rows.append(group.iloc[0])
+            continue
+        ordered = group.assign(
+            _is_manual=(group["source"].astype(str).str.lower() == "manual").astype(int),
+            _created_rank=pd.to_datetime(group.get("created_at"), errors="coerce"),
+        ).sort_values(["_is_manual", "_created_rank", "_ingest_order"], ascending=[False, False, False])
+        selected = ordered.iloc[0]
+        deduped_rows.append(selected)
+        conflict_rows.append(
+            _build_conflict(
+                "production_fact",
+                selected,
+                "Conflicto agente+fecha: se aplicó política determinista (prioridad source=manual; luego último created_at/ingesta).",
+            )
+            | {"policy_applied": "prefer_manual_then_latest"}
+        )
+    deduped = pd.DataFrame(deduped_rows).drop(columns=["_ingest_order"], errors="ignore")
+    return deduped, conflict_rows
+
+
+def _prepare_from_production_facts(df: pd.DataFrame, alias_mapping: dict[str, str] | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    prod = df.copy()
+    if "report_month" not in prod.columns:
+        prod["report_month"] = pd.to_datetime(prod["production_date"], errors="coerce").dt.strftime("%Y-%m")
+    prod["report_month"] = prod["report_month"].astype(str).str.strip()
+    prod["production_date"] = pd.to_datetime(prod["production_date"], errors="coerce")
+    prod["snapshot_date"] = pd.to_datetime(prod.get("snapshot_date"), errors="coerce")
+    prod["snapshot_date"] = prod["snapshot_date"].fillna(prod["production_date"])
+    prod["source"] = prod["source"].astype(str).str.strip().str.lower()
+    prod["granularity"] = prod["granularity"].astype(str).str.strip().str.lower()
+    prod["production_amount"] = pd.to_numeric(prod["production_amount"], errors="coerce").fillna(0.0)
+    if "agent_name" not in prod.columns:
+        prod["agent_name"] = prod["agent_key"].astype(str)
+    if "hierarchy" not in prod.columns:
+        prod["hierarchy"] = ""
+    if "agent_code" not in prod.columns:
+        prod["agent_code"] = ""
+    if "source_sheet" not in prod.columns:
+        prod["source_sheet"] = "production_fact"
+
+    prod = prod[prod["production_date"].notna() & prod["agent_key"].astype(str).str.strip().ne("")]
+    prod, conflict_rows = _resolve_production_fact_conflicts(prod)
+
+    daily = prod[prod["granularity"] == "daily"].copy()
+    if not daily.empty:
+        daily = daily.sort_values(["report_month", "agent_key", "production_date"])
+        daily["mtd_value"] = daily.groupby(["report_month", "agent_key"])["production_amount"].cumsum()
+
+    weekly = prod[prod["granularity"] == "weekly"].copy()
+    if not weekly.empty:
+        weekly["week"] = weekly["production_date"].dt.day.apply(lambda day: ((day - 1) // 7) + 1)
+        weekly = weekly.sort_values(["report_month", "agent_key", "week", "production_date"])
+        weekly["mtd_value"] = weekly.groupby(["report_month", "agent_key"])["production_amount"].cumsum()
+
+    monthly = prod[prod["granularity"] == "monthly_mtd"].copy()
+    if not monthly.empty:
+        monthly["mtd_value"] = monthly["production_amount"]
+
+    normalized = pd.concat([daily, weekly, monthly], ignore_index=True) if not prod.empty else pd.DataFrame()
+    if normalized.empty:
+        return pd.DataFrame(columns=PRODUCTION_COLUMNS), pd.DataFrame(columns=["dataset", "month", "week", "snapshot_date", "agent_key", "agent_name", "details"])
+
+    normalized["month"] = normalized["report_month"]
+    normalized["week"] = normalized["production_date"].apply(_week_of_month)
+    normalized = (
+        normalized.sort_values(["month", "agent_key", "week", "production_date", "snapshot_date"])
+        .groupby(["month", "week", "agent_key"], as_index=False)
+        .agg(
+            agent_name=("agent_name", _first_non_empty),
+            hierarchy=("hierarchy", _first_non_empty),
+            hierarchies_detected=("hierarchy", _join_unique),
+            agent_code=("agent_code", _first_non_empty),
+            snapshot_date=("snapshot_date", "max"),
+            production_mtd=("mtd_value", "max"),
+            source_sheet=("source_sheet", _join_unique),
+        )
+    )
+    normalized["prev_mtd"] = normalized.groupby(["month", "agent_key"])["production_mtd"].shift(fill_value=0.0)
+    normalized["production_weekly_closed"] = (normalized["production_mtd"] - normalized["prev_mtd"]).clip(lower=0.0)
+    normalized["production_weekly_effective"] = normalized["production_weekly_closed"]
+    max_week = normalized.groupby(["month", "agent_key"])["week"].transform("max")
+    normalized["is_completed_week"] = normalized["week"] < max_week
+    normalized["production_monthly_total"] = normalized.groupby(["month", "agent_key"])["production_mtd"].transform("max")
+    normalized["agent_name"] = normalized["agent_name"].apply(lambda value: resolve_alias(value, alias_mapping)).str.title()
+    normalized["hierarchy"] = normalized["hierarchy"].apply(normalize_hierarchy)
+    conflicts_df = pd.DataFrame(conflict_rows)
+    return normalized[PRODUCTION_COLUMNS], conflicts_df
+
+
 def prepare_production_data(
     df: pd.DataFrame,
     config: ThresholdConfig,
@@ -70,6 +182,8 @@ def prepare_production_data(
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     if df.empty:
         return pd.DataFrame(columns=PRODUCTION_COLUMNS), pd.DataFrame(columns=["dataset", "month", "week", "snapshot_date", "agent_key", "agent_name", "details"])
+    if _has_production_fact_shape(df):
+        return _prepare_from_production_facts(df, alias_mapping=alias_mapping)
 
     prod = df.copy()
     prod["agent_name"] = prod["agent_name"].astype(str).str.strip()
@@ -219,14 +333,65 @@ def prepare_appointments_data(
     return appt[APPOINTMENT_COLUMNS], conflicts_df
 
 
+def merge_appointment_sources(
+    excel_appointments: pd.DataFrame,
+    manual_appointments: pd.DataFrame | None,
+    merge_rule: str = "overwrite",
+) -> pd.DataFrame:
+    if manual_appointments is None or manual_appointments.empty:
+        return excel_appointments
+    if excel_appointments.empty:
+        merged = manual_appointments.copy()
+        merged["appointments_month_total"] = merged.groupby(["month", "agent_key"])["appointments"].transform("sum")
+        return merged[APPOINTMENT_COLUMNS]
+
+    excel = excel_appointments.copy()
+    manual = manual_appointments.copy()
+    excel["source_type"] = "excel"
+    manual["source_type"] = "manual"
+
+    combined = pd.concat([excel, manual], ignore_index=True)
+    if merge_rule == "sum":
+        grouped = (
+            combined.groupby(["month", "week", "agent_key"], as_index=False)
+            .agg(
+                agent_name=("agent_name", _first_non_empty),
+                hierarchy=("hierarchy", _first_non_empty),
+                hierarchies_detected=("hierarchies_detected", _join_unique),
+                agent_code=("agent_code", _first_non_empty),
+                appointments=("appointments", "sum"),
+                source_sheet=("source_sheet", _join_unique),
+            )
+            .sort_values(["month", "agent_key", "week"])
+        )
+    else:
+        combined["_priority"] = combined["source_type"].map({"excel": 1, "manual": 2}).fillna(0)
+        winner_rows = (
+            combined.sort_values(["month", "week", "agent_key", "_priority"])
+            .groupby(["month", "week", "agent_key"], as_index=False)
+            .tail(1)
+        )
+        grouped = winner_rows.drop(columns=["source_type", "_priority"]).sort_values(["month", "agent_key", "week"])
+
+    grouped["appointments_month_total"] = grouped.groupby(["month", "agent_key"])["appointments"].transform("sum")
+    return grouped[APPOINTMENT_COLUMNS]
+
+
 def build_weekly_dataset(
     production_df: pd.DataFrame,
     appointments_df: pd.DataFrame,
     config: ThresholdConfig,
+    manual_appointments_df: pd.DataFrame | None = None,
+    appointments_merge_rule: str = "overwrite",
     alias_mapping: dict[str, str] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     prod, prod_conflicts = prepare_production_data(production_df, config, alias_mapping=alias_mapping)
     appt, appt_conflicts = prepare_appointments_data(appointments_df, alias_mapping=alias_mapping)
+    manual_appt, manual_conflicts = prepare_appointments_data(
+        manual_appointments_df if manual_appointments_df is not None else pd.DataFrame(),
+        alias_mapping=alias_mapping,
+    )
+    appt = merge_appointment_sources(appt, manual_appt, merge_rule=appointments_merge_rule)
 
     weekly = pd.merge(
         prod,
@@ -276,7 +441,7 @@ def build_weekly_dataset(
 
     weekly["appointments_month_total"] = weekly.groupby(["month", "agent_key"])["appointments"].transform("sum")
     weekly["production_monthly_total"] = weekly.groupby(["month", "agent_key"])["production_mtd"].transform("max")
-    conflicts = pd.concat([prod_conflicts, appt_conflicts], ignore_index=True)
+    conflicts = pd.concat([prod_conflicts, appt_conflicts, manual_conflicts], ignore_index=True)
     return weekly, conflicts
 
 

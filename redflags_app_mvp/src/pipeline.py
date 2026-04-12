@@ -13,6 +13,8 @@ def run_pipeline(
     raw_production: pd.DataFrame,
     raw_appointments: pd.DataFrame,
     config: ThresholdConfig,
+    manual_appointments: pd.DataFrame | None = None,
+    appointments_merge_rule: str = "overwrite",
     alias_mapping: dict[str, str] | None = None,
     manual_appointments: pd.DataFrame | None = None,
     appointments_merge_rule: str = "overwrite",
