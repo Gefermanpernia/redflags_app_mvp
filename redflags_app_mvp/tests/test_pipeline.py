@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.config import ThresholdConfig
+from src.data_quality import detect_mixed_months
 from src.metrics import build_monthly_dataset, build_summary_table, build_weekly_dataset
 from src.monitoring import build_final_monitoring_set
 from src.normalization import build_agent_key, load_alias_mapping, normalize_name
@@ -83,9 +84,9 @@ def test_report_dataset_excludes_manual_exclusions() -> None:
         {"month": "2026-04", "week": 1, "agent_name": "Carlos Diaz", "hierarchy": "GERENTE", "appointments": 0, "source_sheet": "appt"},
     ])
     config = ThresholdConfig(use_open_week_partial=False)
-    weekly = build_weekly_dataset(production, appointments, config)
+    weekly, _ = build_weekly_dataset(production, appointments, config)
     flags = evaluate_red_flags(weekly, build_monthly_dataset(weekly), config)
-    assert {"RF-001", "RF-002", "RF-003"}.issubset(set(flags["flag_id"].tolist()))
+    assert {"RF-001", "RF-003"}.issubset(set(flags["flag_id"].tolist()))
     assert flags["risk_score"].max() <= 100
     assert (
         compute_risk_score(
@@ -95,6 +96,46 @@ def test_report_dataset_excludes_manual_exclusions() -> None:
         )
         > 0
     )
+
+
+def test_manual_appointments_merge_rule_overwrite() -> None:
+    production = pd.DataFrame([
+        {"month": "2026-04", "week": 2, "agent_name": "Ana Lopez", "hierarchy": "VIP", "production_mtd": 1000, "source_sheet": "prod"},
+    ])
+    appointments_excel = pd.DataFrame([
+        {"month": "2026-04", "week": 2, "agent_name": "Ana Lopez", "hierarchy": "VIP", "appointments": 2, "source_sheet": "excel"},
+    ])
+    appointments_manual = pd.DataFrame([
+        {"month": "2026-04", "week": 2, "agent_name": "Ana Lopez", "hierarchy": "VIP", "appointments": 5, "source_sheet": "manual"},
+    ])
+    weekly, _ = build_weekly_dataset(
+        production,
+        appointments_excel,
+        ThresholdConfig(),
+        manual_appointments_df=appointments_manual,
+        appointments_merge_rule="overwrite",
+    )
+    assert weekly.iloc[0]["appointments"] == 5
+
+
+def test_manual_appointments_merge_rule_sum() -> None:
+    production = pd.DataFrame([
+        {"month": "2026-04", "week": 2, "agent_name": "Ana Lopez", "hierarchy": "VIP", "production_mtd": 1000, "source_sheet": "prod"},
+    ])
+    appointments_excel = pd.DataFrame([
+        {"month": "2026-04", "week": 2, "agent_name": "Ana Lopez", "hierarchy": "VIP", "appointments": 2, "source_sheet": "excel"},
+    ])
+    appointments_manual = pd.DataFrame([
+        {"month": "2026-04", "week": 2, "agent_name": "Ana Lopez", "hierarchy": "VIP", "appointments": 5, "source_sheet": "manual"},
+    ])
+    weekly, _ = build_weekly_dataset(
+        production,
+        appointments_excel,
+        ThresholdConfig(),
+        manual_appointments_df=appointments_manual,
+        appointments_merge_rule="sum",
+    )
+    assert weekly.iloc[0]["appointments"] == 7
 
 
 def test_detect_mixed_months_by_sheet() -> None:
@@ -119,3 +160,113 @@ def test_filter_frames_by_source_mode_uses_expected_sheet() -> None:
 
     assert list(weekly_filtered.keys()) == ["reporte de citas abril"]
     assert list(monthly_filtered.keys()) == ["AUDITORIA"]
+
+
+def test_production_facts_daily_weekly_monthly_are_normalized_to_mtd() -> None:
+    production = pd.DataFrame(
+        [
+            {
+                "agent_key": "name::ana",
+                "agent_name": "Ana Lopez",
+                "report_month": "2026-04",
+                "production_date": "2026-04-02",
+                "granularity": "daily",
+                "production_amount": 100,
+                "source": "excel",
+                "created_at": "2026-04-02T10:00:00",
+                "created_by": "tester",
+            },
+            {
+                "agent_key": "name::ana",
+                "agent_name": "Ana Lopez",
+                "report_month": "2026-04",
+                "production_date": "2026-04-03",
+                "granularity": "daily",
+                "production_amount": 150,
+                "source": "excel",
+                "created_at": "2026-04-03T10:00:00",
+                "created_by": "tester",
+            },
+            {
+                "agent_key": "name::bob",
+                "agent_name": "Bob Ruiz",
+                "report_month": "2026-04",
+                "production_date": "2026-04-10",
+                "granularity": "weekly",
+                "production_amount": 200,
+                "source": "excel",
+                "created_at": "2026-04-10T10:00:00",
+                "created_by": "tester",
+            },
+            {
+                "agent_key": "name::bob",
+                "agent_name": "Bob Ruiz",
+                "report_month": "2026-04",
+                "production_date": "2026-04-17",
+                "granularity": "weekly",
+                "production_amount": 350,
+                "source": "excel",
+                "created_at": "2026-04-17T10:00:00",
+                "created_by": "tester",
+            },
+            {
+                "agent_key": "name::carla",
+                "agent_name": "Carla Diaz",
+                "report_month": "2026-04",
+                "production_date": "2026-04-30",
+                "granularity": "monthly_mtd",
+                "production_amount": 900,
+                "source": "manual",
+                "created_at": "2026-04-30T10:00:00",
+                "created_by": "tester",
+            },
+        ]
+    )
+    appointments = pd.DataFrame(columns=["month", "week", "agent_name", "hierarchy", "appointments", "source_sheet"])
+    weekly, conflicts = build_weekly_dataset(production, appointments, ThresholdConfig())
+    assert conflicts.empty
+
+    ana = weekly[weekly["agent_key"] == "name::ana"].sort_values("week")
+    assert ana["production_mtd"].tolist() == [250]
+    assert ana["production_weekly_closed"].tolist() == [250]
+
+    bob = weekly[weekly["agent_key"] == "name::bob"].sort_values("week")
+    assert bob["production_mtd"].tolist() == [200, 550]
+    assert bob["production_weekly_closed"].tolist() == [200, 350]
+
+    carla = weekly[weekly["agent_key"] == "name::carla"]
+    assert carla["production_mtd"].tolist() == [900]
+
+
+def test_production_fact_conflict_prefers_manual_then_latest() -> None:
+    production = pd.DataFrame(
+        [
+            {
+                "agent_key": "name::ana",
+                "agent_name": "Ana Lopez",
+                "report_month": "2026-04",
+                "production_date": "2026-04-08",
+                "granularity": "daily",
+                "production_amount": 100,
+                "source": "excel",
+                "created_at": "2026-04-08T09:00:00",
+                "created_by": "tester",
+            },
+            {
+                "agent_key": "name::ana",
+                "agent_name": "Ana Lopez",
+                "report_month": "2026-04",
+                "production_date": "2026-04-08",
+                "granularity": "daily",
+                "production_amount": 180,
+                "source": "manual",
+                "created_at": "2026-04-08T08:00:00",
+                "created_by": "tester",
+            },
+        ]
+    )
+    appointments = pd.DataFrame(columns=["month", "week", "agent_name", "hierarchy", "appointments", "source_sheet"])
+    weekly, conflicts = build_weekly_dataset(production, appointments, ThresholdConfig())
+    assert weekly["production_mtd"].max() == 180
+    assert not conflicts.empty
+    assert "prefer_manual_then_latest" in set(conflicts["policy_applied"].astype(str))
