@@ -16,6 +16,8 @@ def run_pipeline(
     manual_appointments: pd.DataFrame | None = None,
     appointments_merge_rule: str = "overwrite",
     alias_mapping: dict[str, str] | None = None,
+    manual_appointments: pd.DataFrame | None = None,
+    appointments_merge_rule: str = "overwrite",
 ) -> Dict[str, pd.DataFrame]:
     merged_appointments = raw_appointments.copy()
     if manual_appointments is not None and not manual_appointments.empty:
