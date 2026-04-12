@@ -59,6 +59,30 @@ def _init_db() -> None:
                 """
             )
         )
+
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS facts_daily (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fact_date TEXT NOT NULL,
+                    month TEXT NOT NULL,
+                    week INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    hierarchy TEXT,
+                    agent_code TEXT,
+                    appointments REAL NOT NULL DEFAULT 0,
+                    production REAL NOT NULL DEFAULT 0,
+                    source_type TEXT NOT NULL DEFAULT 'manual',
+                    source_ref TEXT,
+                    notes TEXT,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+
         conn.execute(
             text(
                 """
@@ -180,3 +204,56 @@ def load_monitoring_overrides(report_month: str | None = None) -> pd.DataFrame:
 def load_audit_log() -> pd.DataFrame:
     _init_db()
     return pd.read_sql("SELECT * FROM run_audit ORDER BY id DESC", ENGINE)
+
+
+def save_daily_fact(
+    *,
+    fact_date: str,
+    agent_name: str,
+    hierarchy: str,
+    agent_code: str,
+    appointments: float,
+    production: float,
+    notes: str,
+    created_by: str,
+) -> None:
+    _init_db()
+    parsed_date = datetime.fromisoformat(fact_date)
+    month = parsed_date.strftime("%Y-%m")
+    week = int((parsed_date.day - 1) // 7 + 1)
+    with ENGINE.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO facts_daily
+                (fact_date, month, week, agent_name, hierarchy, agent_code, appointments, production,
+                 source_type, source_ref, notes, created_by, created_at)
+                VALUES (:fact_date, :month, :week, :agent_name, :hierarchy, :agent_code, :appointments, :production,
+                        'manual', 'streamlit_manual', :notes, :created_by, :created_at)
+                """
+            ),
+            {
+                "fact_date": parsed_date.date().isoformat(),
+                "month": month,
+                "week": week,
+                "agent_name": agent_name,
+                "hierarchy": hierarchy,
+                "agent_code": agent_code,
+                "appointments": float(appointments),
+                "production": float(production),
+                "notes": notes,
+                "created_by": created_by,
+                "created_at": datetime.utcnow().isoformat(),
+            },
+        )
+
+
+def load_daily_facts(month_label: str | None = None) -> pd.DataFrame:
+    _init_db()
+    if month_label:
+        return pd.read_sql(
+            text("SELECT * FROM facts_daily WHERE month = :month ORDER BY fact_date DESC, id DESC"),
+            ENGINE,
+            params={"month": month_label},
+        )
+    return pd.read_sql("SELECT * FROM facts_daily ORDER BY fact_date DESC, id DESC", ENGINE)

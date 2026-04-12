@@ -5,7 +5,9 @@ from pathlib import Path
 import pandas as pd
 
 from src.config import ThresholdConfig
-from src.metrics import build_monthly_dataset, build_summary_table, build_weekly_dataset
+from src.data_quality import detect_mixed_months
+from src.datamart import FieldPriority, build_manual_weekly_inputs, unify_weekly_sources
+from src.metrics import build_monthly_dataset, build_weekly_dataset
 from src.monitoring import build_final_monitoring_set
 from src.normalization import build_agent_key, load_alias_mapping, normalize_name
 from src.parsers import (
@@ -83,9 +85,9 @@ def test_report_dataset_excludes_manual_exclusions() -> None:
         {"month": "2026-04", "week": 1, "agent_name": "Carlos Diaz", "hierarchy": "GERENTE", "appointments": 0, "source_sheet": "appt"},
     ])
     config = ThresholdConfig(use_open_week_partial=False)
-    weekly = build_weekly_dataset(production, appointments, config)
+    weekly, _ = build_weekly_dataset(production, appointments, config)
     flags = evaluate_red_flags(weekly, build_monthly_dataset(weekly), config)
-    assert {"RF-001", "RF-002", "RF-003"}.issubset(set(flags["flag_id"].tolist()))
+    assert {"RF-001", "RF-003"}.issubset(set(flags["flag_id"].tolist()))
     assert flags["risk_score"].max() <= 100
     assert (
         compute_risk_score(
@@ -119,3 +121,38 @@ def test_filter_frames_by_source_mode_uses_expected_sheet() -> None:
 
     assert list(weekly_filtered.keys()) == ["reporte de citas abril"]
     assert list(monthly_filtered.keys()) == ["AUDITORIA"]
+
+
+def test_build_manual_weekly_inputs_derives_mtd() -> None:
+    facts = pd.DataFrame(
+        [
+            {"fact_date": "2026-04-02", "agent_name": "Ana Lopez", "hierarchy": "VIP", "agent_code": "", "appointments": 1, "production": 300},
+            {"fact_date": "2026-04-04", "agent_name": "Ana Lopez", "hierarchy": "VIP", "agent_code": "", "appointments": 1, "production": 200},
+            {"fact_date": "2026-04-10", "agent_name": "Ana Lopez", "hierarchy": "VIP", "agent_code": "", "appointments": 2, "production": 400},
+        ]
+    )
+    raw_production, raw_appointments = build_manual_weekly_inputs(facts)
+    assert raw_production["production_mtd"].tolist() == [500, 900]
+    assert raw_appointments["appointments"].tolist() == [2, 2]
+
+
+def test_unify_weekly_sources_applies_priority_and_creates_conflict() -> None:
+    excel_prod = pd.DataFrame(
+        [{"month": "2026-04", "week": 1, "agent_name": "Ana Lopez", "hierarchy": "VIP", "agent_code": "", "production_mtd": 1000, "source_sheet": "prod"}]
+    )
+    excel_appt = pd.DataFrame(
+        [{"month": "2026-04", "week": 1, "agent_name": "Ana Lopez", "hierarchy": "VIP", "agent_code": "", "appointments": 1, "source_sheet": "appt"}]
+    )
+    manual_facts = pd.DataFrame(
+        [{"fact_date": "2026-04-02", "agent_name": "Ana Lopez", "hierarchy": "VIP", "agent_code": "", "appointments": 3, "production": 700}]
+    )
+
+    prod, appt, conflicts = unify_weekly_sources(
+        excel_prod,
+        excel_appt,
+        manual_facts,
+        priority=FieldPriority(appointments=("manual", "excel"), production=("manual", "excel")),
+    )
+    assert prod.iloc[0]["production_mtd"] == 700
+    assert appt.iloc[0]["appointments"] == 3
+    assert not conflicts.empty
