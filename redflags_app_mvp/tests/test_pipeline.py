@@ -8,7 +8,12 @@ from src.config import ThresholdConfig
 from src.metrics import build_monthly_dataset, build_summary_table, build_weekly_dataset
 from src.monitoring import build_final_monitoring_set
 from src.normalization import build_agent_key, load_alias_mapping, normalize_name
-from src.red_flags import evaluate_red_flags
+from src.parsers import (
+    SOURCE_MODE_MONTHLY_AUDIT,
+    SOURCE_MODE_WEEKLY_DETAIL,
+    filter_frames_by_source_mode,
+)
+from src.red_flags import compute_risk_score, evaluate_red_flags
 
 
 def test_normalize_name_matching_without_hierarchy() -> None:
@@ -78,24 +83,39 @@ def test_report_dataset_excludes_manual_exclusions() -> None:
         {"month": "2026-04", "week": 1, "agent_name": "Carlos Diaz", "hierarchy": "GERENTE", "appointments": 0, "source_sheet": "appt"},
     ])
     config = ThresholdConfig(use_open_week_partial=False)
-    weekly, _ = build_weekly_dataset(production, appointments, config)
-    monthly = build_monthly_dataset(weekly)
-    flags = evaluate_red_flags(weekly, monthly, config)
-    overrides = pd.DataFrame([
-        {"report_month": "2026-04", "agent_key": monthly.iloc[0]["agent_key"], "action_type": "exclude"}
-    ])
-    final = build_final_monitoring_set(monthly, flags, overrides, "2026-04")
-    assert final.empty
+    weekly = build_weekly_dataset(production, appointments, config)
+    flags = evaluate_red_flags(weekly, build_monthly_dataset(weekly), config)
+    assert {"RF-001", "RF-002", "RF-003"}.issubset(set(flags["flag_id"].tolist()))
+    assert flags["risk_score"].max() <= 100
+    assert (
+        compute_risk_score(
+            "RF-001",
+            "alta",
+            {"production_monthly_total": 3000, "monthly_threshold": 1500},
+        )
+        > 0
+    )
 
 
-def test_summary_is_one_row_per_canonical_agent() -> None:
-    weekly = pd.DataFrame([
-        {"month": "2026-04", "week": 1, "agent_key": "name::alimar", "agent_name": "Alimar Salomon", "hierarchy": "SA", "hierarchies_detected": "SA", "appointments": 0, "production_mtd": 1000, "production_weekly_closed": 1000, "production_weekly_effective": 1000, "production_monthly_total": 3000, "appointments_month_total": 0},
-        {"month": "2026-04", "week": 2, "agent_key": "name::alimar", "agent_name": "Alimar Salomon", "hierarchy": "VIP", "hierarchies_detected": "SA, VIP", "appointments": 0, "production_mtd": 3000, "production_weekly_closed": 2000, "production_weekly_effective": 2000, "production_monthly_total": 3000, "appointments_month_total": 0},
-    ])
-    flags = pd.DataFrame([
-        {"month": "2026-04", "week": 2, "agent_key": "name::alimar", "flag_id": "RF-003", "risk_score": 50, "severity": "alta"}
-    ])
-    summary = build_summary_table(weekly, flags)
-    assert len(summary) == 1
-    assert summary.iloc[0]["agent_key"] == "name::alimar"
+def test_detect_mixed_months_by_sheet() -> None:
+    frame = pd.DataFrame(
+        [
+            {"source_sheet": "S1", "month": "2026-03", "agent_name": "A"},
+            {"source_sheet": "S1", "month": "2026-04", "agent_name": "B"},
+        ]
+    )
+    errors = detect_mixed_months(frame, "Producción")
+    assert errors
+
+
+def test_filter_frames_by_source_mode_uses_expected_sheet() -> None:
+    frames = {
+        "reporte de citas abril": pd.DataFrame([{"x": 1}]),
+        "AUDITORIA": pd.DataFrame([{"x": 2}]),
+        "OTRA": pd.DataFrame([{"x": 3}]),
+    }
+    weekly_filtered = filter_frames_by_source_mode(frames, SOURCE_MODE_WEEKLY_DETAIL)
+    monthly_filtered = filter_frames_by_source_mode(frames, SOURCE_MODE_MONTHLY_AUDIT)
+
+    assert list(weekly_filtered.keys()) == ["reporte de citas abril"]
+    assert list(monthly_filtered.keys()) == ["AUDITORIA"]

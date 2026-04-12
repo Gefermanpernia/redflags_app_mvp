@@ -48,6 +48,30 @@ def preview_columns(frames: Mapping[str, pd.DataFrame]) -> List[str]:
 
 
 WEEK_PATTERN = re.compile(r"(\d+)")
+SOURCE_MODE_WEEKLY_DETAIL = "weekly_detail"
+SOURCE_MODE_MONTHLY_AUDIT = "monthly_audit"
+SOURCE_MODE_TO_SHEET = {
+    SOURCE_MODE_WEEKLY_DETAIL: "reporte de citas abril",
+    SOURCE_MODE_MONTHLY_AUDIT: "AUDITORIA",
+}
+
+
+def _normalize_sheet_name(value: str) -> str:
+    return str(value).strip().casefold()
+
+
+def filter_frames_by_source_mode(
+    frames: Mapping[str, pd.DataFrame], source_mode: str
+) -> Dict[str, pd.DataFrame]:
+    target_sheet = SOURCE_MODE_TO_SHEET.get(source_mode)
+    if not target_sheet:
+        return dict(frames)
+    target_key = _normalize_sheet_name(target_sheet)
+    return {
+        sheet_name: frame
+        for sheet_name, frame in frames.items()
+        if _normalize_sheet_name(sheet_name) == target_key
+    }
 
 
 def normalize_week(value) -> int | None:
