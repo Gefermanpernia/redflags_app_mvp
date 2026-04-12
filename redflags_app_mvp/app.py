@@ -19,7 +19,7 @@ from src.data_quality import (
     detect_mixed_months,
     validate_sheet_columns,
 )
-from src.normalization import load_alias_mapping
+from src.normalization import build_agent_key, load_alias_mapping
 from src.parsers import (
     SOURCE_MODE_MONTHLY_AUDIT,
     SOURCE_MODE_WEEKLY_DETAIL,
@@ -30,15 +30,21 @@ from src.parsers import (
     parse_production_frames,
     preview_columns,
 )
-from src.datamart import FieldPriority, build_manual_weekly_inputs, unify_weekly_sources
 from src.monitoring import build_final_monitoring_set
 from src.persistence import (
+    create_operational_record,
+    delete_operational_record,
+    load_agent_catalog,
+    load_appointment_daily_facts,
     load_audit_log,
-    load_daily_facts,
+    load_manual_appointments_weekly,
     load_monitoring_overrides,
+    load_operational_audit_log,
+    load_unified_operational_dataset,
     persist_run,
-    save_daily_fact,
+    save_appointment_daily_fact,
     save_monitoring_override,
+    update_operational_record,
 )
 from src.pipeline import run_pipeline
 from src.reports import build_excel_report, build_pdf_report, dataframe_to_csv_bytes
@@ -119,10 +125,17 @@ def build_threshold_config() -> ThresholdConfig:
             "Usar semana actual abierta como MTD parcial",
             value=DEFAULT_THRESHOLDS.use_open_week_partial,
         )
+        appointments_merge_rule = st.selectbox(
+            "Regla de combinación citas (Excel + carga manual)",
+            options=["overwrite", "sum"],
+            format_func=lambda value: "Manual sobreescribe Excel" if value == "overwrite" else "Manual + Excel (sumar)",
+            index=0,
+        )
 
     st.session_state["generated_by"] = generated_by
     st.session_state["month_label"] = month_label
     st.session_state["alias_file"] = alias_file
+    st.session_state["appointments_merge_rule"] = appointments_merge_rule
     return ThresholdConfig(
         monthly_production_suspicious=monthly_threshold,
         weekly_production_suspicious=weekly_threshold,
@@ -136,15 +149,6 @@ def build_threshold_config() -> ThresholdConfig:
 
 def render_upload_and_process(config: ThresholdConfig) -> None:
     st.subheader("Carga de archivos")
-    process_mode = st.radio(
-        "Modo de procesamiento",
-        options=["excel", "manual", "unified"],
-        format_func=lambda value: {
-            "excel": "Excel (flujo actual)",
-            "manual": "Facts diarios manuales",
-            "unified": "Unificado Excel + manual (data mart)",
-        }[value],
-    )
     col1, col2 = st.columns(2)
 
     with col1:
@@ -248,84 +252,64 @@ def render_upload_and_process(config: ThresholdConfig) -> None:
     )
 
     if st.button("Procesar archivos", type="primary"):
-        if process_mode in {"excel", "unified"} and (production_file is None or appointments_file is None):
+        if production_file is None or appointments_file is None:
             st.error("Debes subir ambos archivos: producción y citas.")
             return
-        if process_mode in {"excel", "unified"} and not selected_source_modes:
+        if not selected_source_modes:
             st.error("Debes seleccionar al menos un source_mode.")
             return
 
         errors = []
-        if process_mode in {"excel", "unified"}:
-            errors += (
-                [
-                    f"Producción: faltan {', '.join(validate_mapping(production_mapping, required_prod))}"
-                ]
-                if validate_mapping(production_mapping, required_prod)
-                else []
-            )
-            errors += (
-                [
-                    f"Citas: faltan {', '.join(validate_mapping(appointments_mapping, required_appt))}"
-                ]
-                if validate_mapping(appointments_mapping, required_appt)
-                else []
-            )
-            errors += validate_sheet_columns(
-                production_frames, production_mapping, required_prod, "Producción"
-            )
-            errors += validate_sheet_columns(
-                appointments_frames, appointments_mapping, required_appt, "Citas"
-            )
+        errors += (
+            [
+                f"Producción: faltan {', '.join(validate_mapping(production_mapping, required_prod))}"
+            ]
+            if validate_mapping(production_mapping, required_prod)
+            else []
+        )
+        errors += (
+            [
+                f"Citas: faltan {', '.join(validate_mapping(appointments_mapping, required_appt))}"
+            ]
+            if validate_mapping(appointments_mapping, required_appt)
+            else []
+        )
+        errors += validate_sheet_columns(
+            production_frames, production_mapping, required_prod, "Producción"
+        )
+        errors += validate_sheet_columns(
+            appointments_frames, appointments_mapping, required_appt, "Citas"
+        )
         if errors:
             for err in errors:
                 st.error(err)
             return
 
-        raw_production = pd.DataFrame()
-        raw_appointments = pd.DataFrame()
-        extra_conflicts = pd.DataFrame()
-        if process_mode in {"excel", "unified"}:
-            raw_production = parse_production_frames(
-                production_frames,
-                production_mapping,
-                layout=production_layout,
-                fallback_month=st.session_state["month_label"],
+        raw_production = parse_production_frames(
+            production_frames,
+            production_mapping,
+            layout=production_layout,
+            fallback_month=st.session_state["month_label"],
+        )
+        filtered_appointments_frames = filter_frames_by_source_mode(
+            appointments_frames, source_mode
+        )
+        if not filtered_appointments_frames:
+            expected_sheet = (
+                "reporte de citas abril"
+                if source_mode == SOURCE_MODE_WEEKLY_DETAIL
+                else "AUDITORIA"
             )
-            filtered_appointments_frames = filter_frames_by_source_mode(
-                appointments_frames, source_mode
+            st.error(
+                f"No se encontró la hoja requerida para source_mode={source_mode}: {expected_sheet}."
             )
-            if not filtered_appointments_frames:
-                expected_sheet = (
-                    "reporte de citas abril"
-                    if source_mode == SOURCE_MODE_WEEKLY_DETAIL
-                    else "AUDITORIA"
-                )
-                st.error(
-                    f"No se encontró la hoja requerida para source_mode={source_mode}: {expected_sheet}."
-                )
-                return
-            raw_appointments = parse_appointments_frames(
-                filtered_appointments_frames,
-                appointments_mapping,
-                layout=appointments_layout,
-                fallback_month=st.session_state["month_label"],
-            )
-
-        if process_mode in {"manual", "unified"}:
-            facts = load_daily_facts(st.session_state["month_label"])
-            if facts.empty and process_mode == "manual":
-                st.error("No hay facts diarios manuales para el mes seleccionado.")
-                return
-            if process_mode == "manual":
-                raw_production, raw_appointments = build_manual_weekly_inputs(facts)
-            else:
-                raw_production, raw_appointments, extra_conflicts = unify_weekly_sources(
-                    raw_production,
-                    raw_appointments,
-                    facts,
-                    FieldPriority(appointments=("manual", "excel"), production=("manual", "excel")),
-                )
+            return
+        raw_appointments = parse_appointments_frames(
+            filtered_appointments_frames,
+            appointments_mapping,
+            layout=appointments_layout,
+            fallback_month=st.session_state["month_label"],
+        )
 
         mixed_month_errors = detect_mixed_months(
             raw_production, "Producción"
@@ -339,14 +323,15 @@ def render_upload_and_process(config: ThresholdConfig) -> None:
             return
 
         alias_mapping = load_alias_mapping(st.session_state.get("alias_file"))
+        manual_appointments = load_manual_appointments_weekly(st.session_state["month_label"])
         results = run_pipeline(
-            raw_production, raw_appointments, config, alias_mapping=alias_mapping
+            raw_production,
+            raw_appointments,
+            config,
+            alias_mapping=alias_mapping,
+            manual_appointments=manual_appointments,
+            appointments_merge_rule=st.session_state.get("appointments_merge_rule", "overwrite"),
         )
-        if not extra_conflicts.empty:
-            results["conflicts"] = pd.concat(
-                [results.get("conflicts", pd.DataFrame()), extra_conflicts],
-                ignore_index=True,
-            )
         run_id = persist_run(
             month_label=st.session_state["month_label"],
             generated_by=st.session_state["generated_by"],
@@ -368,6 +353,161 @@ def render_upload_and_process(config: ThresholdConfig) -> None:
             raw_production, raw_appointments
         )
         st.success(f"Procesamiento completado. Run ID: {run_id}.")
+
+
+def render_operational_registry() -> None:
+    st.subheader("Registro operativo")
+    generated_by = st.session_state.get("generated_by", "operador")
+    with st.expander("A) Citas diarias", expanded=True):
+        c1, c2, c3, c4 = st.columns(4)
+        agent_name = c1.text_input("Agente", key="op_appt_agent")
+        record_date = c2.date_input("Fecha", key="op_appt_date")
+        amount = c3.number_input("Cantidad", min_value=0.0, step=1.0, key="op_appt_qty")
+        notes = c4.text_input("Notas", key="op_appt_notes")
+        if st.button("Guardar cita diaria"):
+            create_operational_record(
+                record_type="appointments",
+                agent_name=agent_name,
+                record_date=str(record_date),
+                amount=amount,
+                load_type="diaria",
+                notes=notes,
+                source_origin="manual",
+                source_detail="form_citas_diarias",
+                created_by=generated_by,
+            )
+            st.success("Cita diaria registrada")
+
+    with st.expander("B) Producción", expanded=True):
+        c1, c2, c3, c4 = st.columns(4)
+        prod_agent = c1.text_input("Agente", key="op_prod_agent")
+        prod_date = c2.date_input("Fecha", key="op_prod_date")
+        load_type = c3.selectbox("Tipo de carga", ["diaria", "semanal", "mensual"], key="op_prod_load")
+        prod_amount = c4.number_input("Monto", min_value=0.0, step=100.0, key="op_prod_amount")
+        if st.button("Guardar producción"):
+            create_operational_record(
+                record_type="production",
+                agent_name=prod_agent,
+                record_date=str(prod_date),
+                amount=prod_amount,
+                load_type=load_type,
+                notes="",
+                source_origin="manual",
+                source_detail="form_produccion",
+                created_by=generated_by,
+            )
+            st.success("Producción registrada")
+
+    with st.expander("Importación masiva CSV (opcional)", expanded=False):
+        st.caption("Columnas requeridas: record_type, agent_name, record_date, amount. Opcionales: load_type, notes")
+        csv_file = st.file_uploader("Subir CSV", type=["csv"], key="operational_csv")
+        if csv_file is not None and st.button("Importar CSV"):
+            csv_df = pd.read_csv(csv_file)
+            required = {"record_type", "agent_name", "record_date", "amount"}
+            missing = required.difference(csv_df.columns)
+            if missing:
+                st.error(f"Faltan columnas en CSV: {', '.join(sorted(missing))}")
+            else:
+                for _, row in csv_df.iterrows():
+                    create_operational_record(
+                        record_type=str(row.get("record_type", "")).strip(),
+                        agent_name=str(row.get("agent_name", "")).strip(),
+                        record_date=str(row.get("record_date", "")).strip(),
+                        amount=float(row.get("amount", 0)),
+                        load_type=str(row.get("load_type", "diaria")).strip() or "diaria",
+                        notes=str(row.get("notes", "")).strip(),
+                        source_origin="csv",
+                        source_detail=getattr(csv_file, "name", "operational.csv"),
+                        created_by=generated_by,
+                    )
+                st.success(f"Importación completada: {len(csv_df)} registros")
+
+    month_default = st.session_state.get("month_label", DEFAULT_MONTH)
+    f1, f2 = st.columns(2)
+    agent_filter = f1.text_input("Filtro por agente", key="op_filter_agent")
+    date_filter = f2.text_input("Filtro por fecha (YYYY-MM o YYYY-MM-DD)", value=month_default, key="op_filter_date")
+    records = load_unified_operational_dataset()
+    if not records.empty:
+        if agent_filter:
+            records = records[records["agent_name"].astype(str).str.contains(agent_filter, case=False, na=False)]
+        if date_filter:
+            records = records[records["record_date"].astype(str).str.startswith(date_filter)]
+
+    st.markdown("#### Tabla editable del día")
+    if records.empty:
+        st.info("No hay registros operativos para el filtro seleccionado")
+        return
+
+    st.dataframe(
+        records[["id", "record_type", "agent_name", "record_date", "amount", "load_type", "notes", "source_origin", "origin_trace"]],
+        use_container_width=True,
+    )
+
+    st.markdown("#### Corrección de registros (con auditoría)")
+    rec_ids = records["id"].astype(int).tolist()
+    selected_id = st.selectbox("Registro", options=rec_ids)
+    selected_row = records[records["id"] == selected_id].iloc[0]
+    e1, e2, e3 = st.columns(3)
+    edit_amount = e1.number_input("Monto corregido", min_value=0.0, value=float(selected_row["amount"]))
+    edit_load = e2.selectbox("Tipo de carga", ["diaria", "semanal", "mensual"], index=["diaria", "semanal", "mensual"].index(str(selected_row["load_type"]) if str(selected_row["load_type"]) in ["diaria", "semanal", "mensual"] else "diaria"))
+    edit_notes = e3.text_input("Notas corregidas", value=str(selected_row.get("notes", "")))
+    c_upd, c_del = st.columns(2)
+    if c_upd.button("Guardar corrección", use_container_width=True):
+        update_operational_record(
+            record_id=int(selected_id),
+            amount=float(edit_amount),
+            notes=edit_notes,
+            load_type=edit_load,
+            performed_by=generated_by,
+        )
+        st.success("Registro actualizado")
+    if c_del.button("Eliminar registro", use_container_width=True):
+        delete_operational_record(record_id=int(selected_id), performed_by=generated_by)
+        st.success("Registro eliminado")
+
+
+def render_manual_load() -> None:
+    st.subheader("Carga manual")
+    generated_by = st.session_state.get("generated_by", "operador")
+    default_month_date = datetime.now().replace(day=1).date()
+    month_date = st.date_input("Mes de trabajo", value=default_month_date, format="YYYY/MM/DD", key="manual_month_date")
+    selected_month = pd.Timestamp(month_date).strftime("%Y-%m")
+
+    catalog = load_agent_catalog()
+    labels = [row.agent_name for _, row in catalog.iterrows()] if not catalog.empty else []
+    selected_label = st.selectbox("Agente (catálogo)", options=[""] + labels)
+
+    selected_row = None
+    if selected_label and not catalog.empty:
+        selected_row = catalog.iloc[labels.index(selected_label)]
+
+    agent_name = st.text_input("Nombre de agente", value=selected_row["agent_name"] if selected_row is not None else "", key="manual_agent_name")
+    agent_code = st.text_input("Código de agente (opcional)", value=selected_row["agent_code"] if selected_row is not None and "agent_code" in selected_row else "", key="manual_agent_code")
+    appointment_date = st.date_input("Fecha del día", value=datetime.now().date(), key="manual_appointment_date")
+    appointment_count = st.number_input("Cantidad de citas", min_value=0.0, step=1.0, key="manual_appointment_count")
+
+    if st.button("Guardar", type="primary", key="manual_save"):
+        if not agent_name.strip():
+            st.error("Debes indicar un agente.")
+            return
+        agent_key = build_agent_key(agent_name=agent_name, hierarchy="", agent_code=agent_code)
+        save_appointment_daily_fact(
+            agent_key=agent_key,
+            agent_code=agent_code,
+            agent_name=agent_name,
+            appointment_date=pd.Timestamp(appointment_date).strftime("%Y-%m-%d"),
+            appointment_count=float(appointment_count),
+            source="manual",
+            created_by=generated_by,
+        )
+        st.success("Carga manual guardada correctamente.")
+
+    st.markdown("#### Detalle diario para auditoría")
+    daily = load_appointment_daily_facts(month_label=selected_month)
+    if daily.empty:
+        st.info("No hay registros manuales en el mes seleccionado.")
+    else:
+        st.dataframe(daily, use_container_width=True)
 
 
 def render_dashboard() -> None:
@@ -417,8 +557,6 @@ def render_dashboard() -> None:
     if "production_monthly_total" in flagged.columns:
         flagged = flagged[flagged["production_monthly_total"] > 0].copy()
 
-
-
     overrides = load_monitoring_overrides(month_filter if month_filter != "Todos" else None)
     selected_month = month_filter if month_filter != "Todos" else (summary["month"].iloc[0] if not summary.empty else "")
     final_set = build_final_monitoring_set(summary, results["flags"], overrides, selected_month) if selected_month else pd.DataFrame()
@@ -456,6 +594,21 @@ def render_dashboard() -> None:
         "Riesgo promedio",
         f"{flags['risk_score'].mean():.1f}" if not flags.empty else "0.0",
     )
+
+    unified = load_unified_operational_dataset(selected_month if selected_month else None)
+    st.markdown("#### Dataset operativo unificado (manual + excel + csv)")
+    if unified.empty:
+        st.info("Sin registros operativos para el período seleccionado")
+    else:
+        u1, u2 = st.columns(2)
+        u1.metric("Registros operativos", f"{len(unified)}")
+        u2.metric("Agentes en operativo", f"{unified['agent_name'].nunique()}")
+        ops_summary = (
+            unified.groupby(["record_type", "source_origin"], as_index=False)
+            .agg(registros=("id", "count"), monto_total=("amount", "sum"))
+            .sort_values(["record_type", "source_origin"])
+        )
+        st.dataframe(ops_summary, use_container_width=True)
 
     st.markdown("#### KPIs por jerarquía")
     if not summary.empty:
@@ -531,11 +684,13 @@ def render_reports() -> None:
         final_for_pdf = default_final
     if "production_monthly_total" in final_for_pdf.columns:
         final_for_pdf = final_for_pdf[final_for_pdf["production_monthly_total"] > 0].copy()
+    unified = load_unified_operational_dataset(month_label)
     pdf_bytes = build_pdf_report(
         final_for_pdf,
         results["flags"],
         month_label=month_label,
         generated_by=generated_by,
+        unified_operational=unified,
     )
     c1, c2, c3 = st.columns(3)
     c1.download_button(
@@ -560,58 +715,29 @@ def render_reports() -> None:
 
 def render_history() -> None:
     st.subheader("Histórico y auditoría")
+    st.markdown("#### Corridas")
     st.dataframe(load_audit_log(), use_container_width=True)
-
-
-def render_manual_facts() -> None:
-    st.subheader("Captura manual de facts diarios")
-    with st.form("manual_facts_form"):
-        c1, c2, c3 = st.columns(3)
-        fact_date = c1.date_input("Fecha del fact")
-        agent_name = c2.text_input("Agente")
-        hierarchy = c3.text_input("Jerarquía", value="")
-        c4, c5, c6 = st.columns(3)
-        agent_code = c4.text_input("Código agente", value="")
-        appointments = c5.number_input("Citas del día", min_value=0.0, value=0.0, step=1.0)
-        production = c6.number_input("Producción del día", min_value=0.0, value=0.0, step=100.0)
-        notes = st.text_input("Notas", value="")
-        submitted = st.form_submit_button("Guardar fact diario", type="primary")
-        if submitted:
-            if not agent_name.strip():
-                st.error("El nombre del agente es obligatorio.")
-            else:
-                save_daily_fact(
-                    fact_date=fact_date.isoformat(),
-                    agent_name=agent_name.strip(),
-                    hierarchy=hierarchy.strip(),
-                    agent_code=agent_code.strip(),
-                    appointments=appointments,
-                    production=production,
-                    notes=notes.strip(),
-                    created_by=st.session_state.get("generated_by", "operador"),
-                )
-                st.success("Fact diario guardado correctamente.")
-
-    month_label = st.session_state.get("month_label", DEFAULT_MONTH)
-    st.markdown(f"#### Facts diarios ({month_label})")
-    st.dataframe(load_daily_facts(month_label), use_container_width=True)
+    st.markdown("#### Auditoría de correcciones operativas")
+    st.dataframe(load_operational_audit_log(), use_container_width=True)
 
 
 def main() -> None:
     st.title(APP_TITLE)
     config = build_threshold_config()
-    tabs = st.tabs(["Carga", "Captura manual", "Dashboard", "Detalle", "Reportes", "Histórico"])
+    tabs = st.tabs(["Carga", "Carga manual", "Registro operativo", "Dashboard", "Detalle", "Reportes", "Histórico"])
     with tabs[0]:
         render_upload_and_process(config)
     with tabs[1]:
-        render_manual_facts()
+        render_manual_load()
     with tabs[2]:
-        render_dashboard()
+        render_operational_registry()
     with tabs[3]:
-        render_agent_detail()
+        render_dashboard()
     with tabs[4]:
-        render_reports()
+        render_agent_detail()
     with tabs[5]:
+        render_reports()
+    with tabs[6]:
         render_history()
 
 
