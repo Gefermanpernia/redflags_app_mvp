@@ -336,6 +336,8 @@ def render_dashboard() -> None:
 
     flagged_keys = set(flags["agent_key"].tolist())
     flagged = summary[summary["agent_key"].isin(flagged_keys)].copy()
+    if "production_monthly_total" in flagged.columns:
+        flagged = flagged[flagged["production_monthly_total"] > 0].copy()
 
 
 
@@ -363,6 +365,7 @@ def render_dashboard() -> None:
         final_set["selected_for_pdf"] = True
         edited = st.data_editor(final_set[["selected_for_pdf", "agent_name", "hierarchy", "appointments_month_total", "production_monthly_total", "active_flags", "inclusion_reason"]], use_container_width=True, key="final_pdf_editor")
         st.session_state["final_pdf_set"] = final_set.loc[edited["selected_for_pdf"]].copy()
+        st.session_state["final_pdf_month"] = selected_month
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric(
@@ -442,10 +445,14 @@ def render_reports() -> None:
     generated_by = st.session_state.get("generated_by", "operador")
     excel_bytes = build_excel_report(results)
     csv_bytes = dataframe_to_csv_bytes(results["summary"])
+    overrides = load_monitoring_overrides(month_label)
+    default_final = build_final_monitoring_set(results["summary"], results["flags"], overrides, month_label)
     final_for_pdf = st.session_state.get("final_pdf_set")
-    if final_for_pdf is None:
-        overrides = load_monitoring_overrides(month_label)
-        final_for_pdf = build_final_monitoring_set(results["summary"], results["flags"], overrides, month_label)
+    final_pdf_month = st.session_state.get("final_pdf_month")
+    if final_for_pdf is None or final_pdf_month != month_label or final_for_pdf.empty:
+        final_for_pdf = default_final
+    if "production_monthly_total" in final_for_pdf.columns:
+        final_for_pdf = final_for_pdf[final_for_pdf["production_monthly_total"] > 0].copy()
     pdf_bytes = build_pdf_report(
         final_for_pdf,
         results["flags"],

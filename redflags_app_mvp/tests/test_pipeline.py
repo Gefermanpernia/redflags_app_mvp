@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.config import ThresholdConfig
-from src.metrics import build_monthly_dataset, build_weekly_dataset
+from src.metrics import build_monthly_dataset, build_summary_table, build_weekly_dataset
 from src.monitoring import build_final_monitoring_set
 from src.normalization import build_agent_key, load_alias_mapping, normalize_name
 from src.red_flags import evaluate_red_flags
@@ -86,3 +86,16 @@ def test_report_dataset_excludes_manual_exclusions() -> None:
     ])
     final = build_final_monitoring_set(monthly, flags, overrides, "2026-04")
     assert final.empty
+
+
+def test_summary_is_one_row_per_canonical_agent() -> None:
+    weekly = pd.DataFrame([
+        {"month": "2026-04", "week": 1, "agent_key": "name::alimar", "agent_name": "Alimar Salomon", "hierarchy": "SA", "hierarchies_detected": "SA", "appointments": 0, "production_mtd": 1000, "production_weekly_closed": 1000, "production_weekly_effective": 1000, "production_monthly_total": 3000, "appointments_month_total": 0},
+        {"month": "2026-04", "week": 2, "agent_key": "name::alimar", "agent_name": "Alimar Salomon", "hierarchy": "VIP", "hierarchies_detected": "SA, VIP", "appointments": 0, "production_mtd": 3000, "production_weekly_closed": 2000, "production_weekly_effective": 2000, "production_monthly_total": 3000, "appointments_month_total": 0},
+    ])
+    flags = pd.DataFrame([
+        {"month": "2026-04", "week": 2, "agent_key": "name::alimar", "flag_id": "RF-003", "risk_score": 50, "severity": "alta"}
+    ])
+    summary = build_summary_table(weekly, flags)
+    assert len(summary) == 1
+    assert summary.iloc[0]["agent_key"] == "name::alimar"

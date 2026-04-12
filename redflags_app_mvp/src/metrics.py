@@ -309,7 +309,15 @@ def build_summary_table(
         return pd.DataFrame()
 
     weeks = weeks or list(range(1, 6))
-    base = weekly_df[["month", "agent_key", "agent_name", "hierarchy", "hierarchies_detected"]].drop_duplicates().copy()
+    base = (
+        weekly_df.groupby(["month", "agent_key"], as_index=False)
+        .agg(
+            agent_name=("agent_name", _first_non_empty),
+            hierarchy=("hierarchy", _first_non_empty),
+            hierarchies_detected=("hierarchies_detected", _join_unique),
+        )
+        .copy()
+    )
 
     appointments_pivot = (
         weekly_df.pivot_table(index=["month", "agent_key"], columns="week", values="appointments", aggfunc="sum", fill_value=0)
