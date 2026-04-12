@@ -160,3 +160,113 @@ def test_filter_frames_by_source_mode_uses_expected_sheet() -> None:
 
     assert list(weekly_filtered.keys()) == ["reporte de citas abril"]
     assert list(monthly_filtered.keys()) == ["AUDITORIA"]
+
+
+def test_production_facts_daily_weekly_monthly_are_normalized_to_mtd() -> None:
+    production = pd.DataFrame(
+        [
+            {
+                "agent_key": "name::ana",
+                "agent_name": "Ana Lopez",
+                "report_month": "2026-04",
+                "production_date": "2026-04-02",
+                "granularity": "daily",
+                "production_amount": 100,
+                "source": "excel",
+                "created_at": "2026-04-02T10:00:00",
+                "created_by": "tester",
+            },
+            {
+                "agent_key": "name::ana",
+                "agent_name": "Ana Lopez",
+                "report_month": "2026-04",
+                "production_date": "2026-04-03",
+                "granularity": "daily",
+                "production_amount": 150,
+                "source": "excel",
+                "created_at": "2026-04-03T10:00:00",
+                "created_by": "tester",
+            },
+            {
+                "agent_key": "name::bob",
+                "agent_name": "Bob Ruiz",
+                "report_month": "2026-04",
+                "production_date": "2026-04-10",
+                "granularity": "weekly",
+                "production_amount": 200,
+                "source": "excel",
+                "created_at": "2026-04-10T10:00:00",
+                "created_by": "tester",
+            },
+            {
+                "agent_key": "name::bob",
+                "agent_name": "Bob Ruiz",
+                "report_month": "2026-04",
+                "production_date": "2026-04-17",
+                "granularity": "weekly",
+                "production_amount": 350,
+                "source": "excel",
+                "created_at": "2026-04-17T10:00:00",
+                "created_by": "tester",
+            },
+            {
+                "agent_key": "name::carla",
+                "agent_name": "Carla Diaz",
+                "report_month": "2026-04",
+                "production_date": "2026-04-30",
+                "granularity": "monthly_mtd",
+                "production_amount": 900,
+                "source": "manual",
+                "created_at": "2026-04-30T10:00:00",
+                "created_by": "tester",
+            },
+        ]
+    )
+    appointments = pd.DataFrame(columns=["month", "week", "agent_name", "hierarchy", "appointments", "source_sheet"])
+    weekly, conflicts = build_weekly_dataset(production, appointments, ThresholdConfig())
+    assert conflicts.empty
+
+    ana = weekly[weekly["agent_key"] == "name::ana"].sort_values("week")
+    assert ana["production_mtd"].tolist() == [250]
+    assert ana["production_weekly_closed"].tolist() == [250]
+
+    bob = weekly[weekly["agent_key"] == "name::bob"].sort_values("week")
+    assert bob["production_mtd"].tolist() == [200, 550]
+    assert bob["production_weekly_closed"].tolist() == [200, 350]
+
+    carla = weekly[weekly["agent_key"] == "name::carla"]
+    assert carla["production_mtd"].tolist() == [900]
+
+
+def test_production_fact_conflict_prefers_manual_then_latest() -> None:
+    production = pd.DataFrame(
+        [
+            {
+                "agent_key": "name::ana",
+                "agent_name": "Ana Lopez",
+                "report_month": "2026-04",
+                "production_date": "2026-04-08",
+                "granularity": "daily",
+                "production_amount": 100,
+                "source": "excel",
+                "created_at": "2026-04-08T09:00:00",
+                "created_by": "tester",
+            },
+            {
+                "agent_key": "name::ana",
+                "agent_name": "Ana Lopez",
+                "report_month": "2026-04",
+                "production_date": "2026-04-08",
+                "granularity": "daily",
+                "production_amount": 180,
+                "source": "manual",
+                "created_at": "2026-04-08T08:00:00",
+                "created_by": "tester",
+            },
+        ]
+    )
+    appointments = pd.DataFrame(columns=["month", "week", "agent_name", "hierarchy", "appointments", "source_sheet"])
+    weekly, conflicts = build_weekly_dataset(production, appointments, ThresholdConfig())
+    assert weekly["production_mtd"].max() == 180
+    assert not conflicts.empty
+    assert "prefer_manual_then_latest" in set(conflicts["policy_applied"].astype(str))
