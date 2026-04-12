@@ -74,6 +74,23 @@ def _init_db() -> None:
                 """
             )
         )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS appointment_daily_fact (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_key TEXT NOT NULL,
+                    agent_code TEXT,
+                    agent_name TEXT NOT NULL,
+                    appointment_date TEXT NOT NULL,
+                    appointment_count REAL NOT NULL,
+                    source TEXT NOT NULL CHECK(source IN ('manual', 'excel')),
+                    created_at TEXT NOT NULL,
+                    created_by TEXT NOT NULL
+                )
+                """
+            )
+        )
 
 
 def persist_run(
@@ -180,3 +197,131 @@ def load_monitoring_overrides(report_month: str | None = None) -> pd.DataFrame:
 def load_audit_log() -> pd.DataFrame:
     _init_db()
     return pd.read_sql("SELECT * FROM run_audit ORDER BY id DESC", ENGINE)
+
+
+def save_appointment_daily_fact(
+    *,
+    agent_key: str,
+    agent_code: str,
+    agent_name: str,
+    appointment_date: str,
+    appointment_count: float,
+    source: str,
+    created_by: str,
+) -> None:
+    _init_db()
+    with ENGINE.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO appointment_daily_fact
+                (agent_key, agent_code, agent_name, appointment_date, appointment_count, source, created_at, created_by)
+                VALUES (:agent_key, :agent_code, :agent_name, :appointment_date, :appointment_count, :source, :created_at, :created_by)
+                """
+            ),
+            {
+                "agent_key": agent_key,
+                "agent_code": agent_code,
+                "agent_name": agent_name,
+                "appointment_date": appointment_date,
+                "appointment_count": appointment_count,
+                "source": source,
+                "created_at": datetime.utcnow().isoformat(),
+                "created_by": created_by,
+            },
+        )
+
+
+def load_appointment_daily_facts(month_label: str | None = None) -> pd.DataFrame:
+    _init_db()
+    base_query = """
+        SELECT
+            id,
+            agent_key,
+            COALESCE(agent_code, '') AS agent_code,
+            agent_name,
+            appointment_date,
+            appointment_count,
+            source,
+            created_at,
+            created_by
+        FROM appointment_daily_fact
+    """
+    if month_label:
+        query = base_query + " WHERE substr(appointment_date, 1, 7) = :month_label ORDER BY appointment_date DESC, id DESC"
+        return pd.read_sql(text(query), ENGINE, params={"month_label": month_label})
+    return pd.read_sql(base_query + " ORDER BY appointment_date DESC, id DESC", ENGINE)
+
+
+def _week_of_month_sunday_closure(date_value: pd.Timestamp) -> int:
+    first_day = date_value.replace(day=1)
+    first_sunday_offset = (6 - first_day.weekday()) % 7
+    if first_sunday_offset == 0:
+        first_week_end = first_day
+    else:
+        first_week_end = first_day + pd.Timedelta(days=first_sunday_offset)
+    if date_value <= first_week_end:
+        return 1
+    delta_days = (date_value - first_week_end).days
+    return 2 + (delta_days - 1) // 7
+
+
+def load_manual_appointments_weekly(month_label: str) -> pd.DataFrame:
+    daily = load_appointment_daily_facts(month_label=month_label)
+    if daily.empty:
+        return pd.DataFrame(
+            columns=[
+                "month",
+                "week",
+                "agent_key",
+                "agent_name",
+                "agent_code",
+                "hierarchy",
+                "appointments",
+                "source_sheet",
+            ]
+        )
+
+    manual = daily[daily["source"] == "manual"].copy()
+    if manual.empty:
+        return pd.DataFrame(
+            columns=[
+                "month",
+                "week",
+                "agent_key",
+                "agent_name",
+                "agent_code",
+                "hierarchy",
+                "appointments",
+                "source_sheet",
+            ]
+        )
+
+    manual["appointment_date"] = pd.to_datetime(manual["appointment_date"], errors="coerce")
+    manual = manual.dropna(subset=["appointment_date"])
+    manual["month"] = manual["appointment_date"].dt.strftime("%Y-%m")
+    manual["week"] = manual["appointment_date"].apply(_week_of_month_sunday_closure)
+    manual["hierarchy"] = ""
+    weekly = (
+        manual.groupby(["month", "week", "agent_key"], as_index=False)
+        .agg(
+            agent_name=("agent_name", "last"),
+            agent_code=("agent_code", "last"),
+            hierarchy=("hierarchy", "last"),
+            appointments=("appointment_count", "sum"),
+        )
+        .sort_values(["month", "agent_name", "week"])
+    )
+    weekly["source_sheet"] = "manual_daily_fact"
+    return weekly
+
+
+def load_agent_catalog() -> pd.DataFrame:
+    _init_db()
+    query = """
+        SELECT agent_key, COALESCE(agent_code, '') AS agent_code, agent_name
+        FROM appointment_daily_fact
+        GROUP BY agent_key, agent_code, agent_name
+        ORDER BY agent_name
+    """
+    return pd.read_sql(text(query), ENGINE)

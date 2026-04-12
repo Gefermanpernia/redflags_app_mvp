@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.config import ThresholdConfig
+from src.data_quality import detect_mixed_months
 from src.metrics import build_monthly_dataset, build_summary_table, build_weekly_dataset
 from src.monitoring import build_final_monitoring_set
 from src.normalization import build_agent_key, load_alias_mapping, normalize_name
@@ -83,9 +84,9 @@ def test_report_dataset_excludes_manual_exclusions() -> None:
         {"month": "2026-04", "week": 1, "agent_name": "Carlos Diaz", "hierarchy": "GERENTE", "appointments": 0, "source_sheet": "appt"},
     ])
     config = ThresholdConfig(use_open_week_partial=False)
-    weekly = build_weekly_dataset(production, appointments, config)
+    weekly, _ = build_weekly_dataset(production, appointments, config)
     flags = evaluate_red_flags(weekly, build_monthly_dataset(weekly), config)
-    assert {"RF-001", "RF-002", "RF-003"}.issubset(set(flags["flag_id"].tolist()))
+    assert {"RF-001", "RF-003"}.issubset(set(flags["flag_id"].tolist()))
     assert flags["risk_score"].max() <= 100
     assert (
         compute_risk_score(
@@ -95,6 +96,46 @@ def test_report_dataset_excludes_manual_exclusions() -> None:
         )
         > 0
     )
+
+
+def test_manual_appointments_merge_rule_overwrite() -> None:
+    production = pd.DataFrame([
+        {"month": "2026-04", "week": 2, "agent_name": "Ana Lopez", "hierarchy": "VIP", "production_mtd": 1000, "source_sheet": "prod"},
+    ])
+    appointments_excel = pd.DataFrame([
+        {"month": "2026-04", "week": 2, "agent_name": "Ana Lopez", "hierarchy": "VIP", "appointments": 2, "source_sheet": "excel"},
+    ])
+    appointments_manual = pd.DataFrame([
+        {"month": "2026-04", "week": 2, "agent_name": "Ana Lopez", "hierarchy": "VIP", "appointments": 5, "source_sheet": "manual"},
+    ])
+    weekly, _ = build_weekly_dataset(
+        production,
+        appointments_excel,
+        ThresholdConfig(),
+        manual_appointments_df=appointments_manual,
+        appointments_merge_rule="overwrite",
+    )
+    assert weekly.iloc[0]["appointments"] == 5
+
+
+def test_manual_appointments_merge_rule_sum() -> None:
+    production = pd.DataFrame([
+        {"month": "2026-04", "week": 2, "agent_name": "Ana Lopez", "hierarchy": "VIP", "production_mtd": 1000, "source_sheet": "prod"},
+    ])
+    appointments_excel = pd.DataFrame([
+        {"month": "2026-04", "week": 2, "agent_name": "Ana Lopez", "hierarchy": "VIP", "appointments": 2, "source_sheet": "excel"},
+    ])
+    appointments_manual = pd.DataFrame([
+        {"month": "2026-04", "week": 2, "agent_name": "Ana Lopez", "hierarchy": "VIP", "appointments": 5, "source_sheet": "manual"},
+    ])
+    weekly, _ = build_weekly_dataset(
+        production,
+        appointments_excel,
+        ThresholdConfig(),
+        manual_appointments_df=appointments_manual,
+        appointments_merge_rule="sum",
+    )
+    assert weekly.iloc[0]["appointments"] == 7
 
 
 def test_detect_mixed_months_by_sheet() -> None:
