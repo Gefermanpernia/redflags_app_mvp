@@ -11,25 +11,29 @@ import pandas as pd
 def normalize_text(value: Any) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return ""
-    text = str(value).strip().upper()
+    text = str(value).strip().lower()
     text = unicodedata.normalize("NFKD", text)
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    text = re.sub(r"[^A-Z0-9 ]+", " ", text)
+    text = re.sub(r"[^a-z0-9 ]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
-COMMON_SUFFIXES = {"JR", "SR", "LIC", "LIC.", "ING", "ING."}
+COMMON_SUFFIXES = {"jr", "sr", "lic", "ing"}
 
 
 def normalize_name(value: Any) -> str:
     text = normalize_text(value)
-    parts = [part for part in text.split(" ") if part not in COMMON_SUFFIXES]
+    parts = [part for part in text.split(" ") if part and part not in COMMON_SUFFIXES]
     return " ".join(parts)
 
 
 def normalize_hierarchy(value: Any) -> str:
-    return normalize_text(value)
+    return normalize_text(value).upper()
+
+
+def normalize_agent_code(value: Any) -> str:
+    return normalize_text(value).replace(" ", "")
 
 
 def load_alias_mapping(csv_path: str | Path | None) -> dict[str, str]:
@@ -68,8 +72,12 @@ def resolve_alias(name: Any, alias_mapping: dict[str, str] | None = None) -> str
 
 
 def build_agent_key(
-    agent_name: Any, hierarchy: Any = "", alias_mapping: dict[str, str] | None = None
+    agent_name: Any,
+    hierarchy: Any = "",
+    alias_mapping: dict[str, str] | None = None,
+    agent_code: Any = None,
 ) -> str:
-    return (
-        f"{resolve_alias(agent_name, alias_mapping)}::{normalize_hierarchy(hierarchy)}"
-    )
+    normalized_code = normalize_agent_code(agent_code)
+    if normalized_code:
+        return f"code::{normalized_code}"
+    return f"name::{resolve_alias(agent_name, alias_mapping)}"

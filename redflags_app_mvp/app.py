@@ -27,7 +27,13 @@ from src.parsers import (
     parse_production_frames,
     preview_columns,
 )
-from src.persistence import load_audit_log, persist_run
+from src.monitoring import build_final_monitoring_set
+from src.persistence import (
+    load_audit_log,
+    load_monitoring_overrides,
+    persist_run,
+    save_monitoring_override,
+)
 from src.pipeline import run_pipeline
 from src.reports import build_excel_report, build_pdf_report, dataframe_to_csv_bytes
 
@@ -79,6 +85,12 @@ def build_threshold_config() -> ThresholdConfig:
             value=float(DEFAULT_THRESHOLDS.weekly_production_suspicious),
             step=100.0,
         )
+        strict_weekly_threshold = st.number_input(
+            "Umbral semanal estricto",
+            min_value=0.0,
+            value=float(DEFAULT_THRESHOLDS.weekly_production_strict),
+            step=100.0,
+        )
         spike_threshold = st.number_input(
             "Umbral pico última semana",
             min_value=0.0,
@@ -108,6 +120,7 @@ def build_threshold_config() -> ThresholdConfig:
     return ThresholdConfig(
         monthly_production_suspicious=monthly_threshold,
         weekly_production_suspicious=weekly_threshold,
+        weekly_production_strict=strict_weekly_threshold,
         spike_last_week_threshold=spike_threshold,
         few_appointments_threshold=few_appts,
         insignificant_production_threshold=insignificant_prod,
@@ -270,6 +283,7 @@ def render_upload_and_process(config: ThresholdConfig) -> None:
             monthly_df=results["monthly"],
             flags_df=results["flags"],
             summary_df=results["summary"],
+            conflicts_df=results.get("conflicts"),
         )
         st.session_state["results"] = results
         st.session_state["quality_summary"] = build_quality_summary(
@@ -322,6 +336,36 @@ def render_dashboard() -> None:
 
     flagged_keys = set(flags["agent_key"].tolist())
     flagged = summary[summary["agent_key"].isin(flagged_keys)].copy()
+    if "production_monthly_total" in flagged.columns:
+        flagged = flagged[flagged["production_monthly_total"] > 0].copy()
+
+
+
+    overrides = load_monitoring_overrides(month_filter if month_filter != "Todos" else None)
+    selected_month = month_filter if month_filter != "Todos" else (summary["month"].iloc[0] if not summary.empty else "")
+    final_set = build_final_monitoring_set(summary, results["flags"], overrides, selected_month) if selected_month else pd.DataFrame()
+
+    st.markdown("#### Controles de monitoreo manual")
+    if not summary.empty:
+        agent_options = {f"{r.agent_name} ({r.agent_key})": r.agent_key for _, r in summary.drop_duplicates(subset=["agent_key"]).iterrows()}
+        selected_label = st.selectbox("Agente para incluir/excluir", options=list(agent_options.keys()) if agent_options else [])
+        reason = st.text_input("Razón manual")
+        c_inc, c_exc = st.columns(2)
+        if c_inc.button("Incluir en reporte", use_container_width=True) and selected_label and reason:
+            save_monitoring_override(agent_key=agent_options[selected_label], report_month=selected_month, action_type="include", reason=reason, created_by=st.session_state.get("generated_by", "operador"))
+            st.success("Inclusión manual guardada")
+        if c_exc.button("Excluir del reporte", use_container_width=True) and selected_label and reason:
+            save_monitoring_override(agent_key=agent_options[selected_label], report_month=selected_month, action_type="exclude", reason=reason, created_by=st.session_state.get("generated_by", "operador"))
+            st.success("Exclusión manual guardada")
+
+    st.markdown("#### Lista final previa a PDF")
+    if final_set.empty:
+        st.info("No hay agentes en el conjunto final para el mes seleccionado.")
+    else:
+        final_set["selected_for_pdf"] = True
+        edited = st.data_editor(final_set[["selected_for_pdf", "agent_name", "hierarchy", "appointments_month_total", "production_monthly_total", "active_flags", "inclusion_reason"]], use_container_width=True, key="final_pdf_editor")
+        st.session_state["final_pdf_set"] = final_set.loc[edited["selected_for_pdf"]].copy()
+        st.session_state["final_pdf_month"] = selected_month
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric(
@@ -361,9 +405,13 @@ def render_dashboard() -> None:
         )
 
     quality = st.session_state.get("quality_summary")
+    conflicts = results.get("conflicts")
     if quality is not None:
         st.markdown("#### Resumen de calidad de datos")
         st.dataframe(quality, use_container_width=True)
+    if conflicts is not None and not conflicts.empty:
+        st.markdown("#### Conflictos de importación detectados")
+        st.dataframe(conflicts, use_container_width=True)
 
 
 def render_agent_detail() -> None:
@@ -397,9 +445,17 @@ def render_reports() -> None:
     generated_by = st.session_state.get("generated_by", "operador")
     excel_bytes = build_excel_report(results)
     csv_bytes = dataframe_to_csv_bytes(results["summary"])
+    overrides = load_monitoring_overrides(month_label)
+    default_final = build_final_monitoring_set(results["summary"], results["flags"], overrides, month_label)
+    final_for_pdf = st.session_state.get("final_pdf_set")
+    final_pdf_month = st.session_state.get("final_pdf_month")
+    if final_for_pdf is None or final_pdf_month != month_label or final_for_pdf.empty:
+        final_for_pdf = default_final
+    if "production_monthly_total" in final_for_pdf.columns:
+        final_for_pdf = final_for_pdf[final_for_pdf["production_monthly_total"] > 0].copy()
     pdf_bytes = build_pdf_report(
+        final_for_pdf,
         results["flags"],
-        results["summary"],
         month_label=month_label,
         generated_by=generated_by,
     )
