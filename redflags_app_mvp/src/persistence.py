@@ -114,8 +114,25 @@ def _init_db() -> None:
         )
 
 
-def _to_month_label(value: str) -> str:
-    return pd.to_datetime(value, errors="coerce").strftime("%Y-%m") if pd.notna(pd.to_datetime(value, errors="coerce")) else str(value)[:7]
+def _soft_delete_previous_excel_records(month_label: str, source_detail: str) -> None:
+    with ENGINE.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE operational_records
+                SET deleted_at = :deleted_at
+                WHERE source_origin = 'excel'
+                  AND month_label = :month_label
+                  AND source_detail = :source_detail
+                  AND deleted_at IS NULL
+                """
+            ),
+            {
+                "deleted_at": datetime.utcnow().isoformat(),
+                "month_label": month_label,
+                "source_detail": source_detail,
+            },
+        )
 
 
 def _append_operational_records(frame: pd.DataFrame) -> None:
@@ -211,6 +228,9 @@ def persist_run(
         conflicts_df.assign(run_id=run_id).to_sql("import_conflicts", ENGINE, if_exists="append", index=False)
 
     created_at = datetime.utcnow().isoformat()
+    _soft_delete_previous_excel_records(month_label, appointments_file_name)
+    _soft_delete_previous_excel_records(month_label, production_file_name)
+
     if not raw_appointments.empty:
         appointments_records = raw_appointments[["agent_name", "month", "appointments"]].copy()
         appointments_records["record_date"] = pd.to_datetime(appointments_records["month"].astype(str) + "-01", errors="coerce").dt.strftime("%Y-%m-%d")
@@ -368,8 +388,10 @@ def load_unified_operational_dataset(month_label: str | None = None) -> pd.DataF
     records = load_operational_records(month_label)
     if records.empty:
         return records
+    dedupe_keys = ["record_type", "agent_name", "record_date", "amount", "source_origin", "source_detail"]
+    records = records.sort_values(["id"], ascending=False).drop_duplicates(subset=dedupe_keys, keep="first")
     records["origin_trace"] = records["source_origin"].astype(str) + " | " + records["source_detail"].fillna("")
-    return records
+    return records.sort_values(["record_date", "id"], ascending=[False, False]).reset_index(drop=True)
 
 
 def load_operational_audit_log() -> pd.DataFrame:
