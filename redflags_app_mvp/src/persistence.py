@@ -59,6 +59,21 @@ def _init_db() -> None:
                 """
             )
         )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS monitoring_overrides (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_key TEXT NOT NULL,
+                    report_month TEXT NOT NULL,
+                    action_type TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    created_by TEXT NOT NULL
+                )
+                """
+            )
+        )
 
 
 def persist_run(
@@ -74,6 +89,7 @@ def persist_run(
     monthly_df: pd.DataFrame,
     flags_df: pd.DataFrame,
     summary_df: pd.DataFrame,
+    conflicts_df: pd.DataFrame | None = None,
 ) -> int:
     _init_db()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -109,11 +125,7 @@ def persist_run(
     ):
         if frame.empty:
             continue
-        traces = (
-            frame.groupby("source_sheet", as_index=False)
-            .size()
-            .rename(columns={"size": "row_count", "source_sheet": "source_sheet"})
-        )
+        traces = frame.groupby("source_sheet", as_index=False).size().rename(columns={"size": "row_count", "source_sheet": "source_sheet"})
         traces["run_id"] = run_id
         traces["dataset_type"] = dataset_type
         traces["file_name"] = file_name
@@ -121,19 +133,48 @@ def persist_run(
         traces["created_at"] = timestamp
         traces.to_sql("file_trace", ENGINE, if_exists="append", index=False)
 
-    weekly_df.assign(run_id=run_id).to_sql(
-        "weekly_results", ENGINE, if_exists="append", index=False
-    )
-    monthly_df.assign(run_id=run_id).to_sql(
-        "monthly_results", ENGINE, if_exists="append", index=False
-    )
-    flags_df.assign(run_id=run_id).to_sql(
-        "flags_results", ENGINE, if_exists="append", index=False
-    )
-    summary_df.assign(run_id=run_id).to_sql(
-        "summary_results", ENGINE, if_exists="append", index=False
-    )
+    weekly_df.assign(run_id=run_id).to_sql("weekly_results", ENGINE, if_exists="append", index=False)
+    monthly_df.assign(run_id=run_id).to_sql("monthly_results", ENGINE, if_exists="append", index=False)
+    flags_df.assign(run_id=run_id).to_sql("flags_results", ENGINE, if_exists="append", index=False)
+    summary_df.assign(run_id=run_id).to_sql("summary_results", ENGINE, if_exists="append", index=False)
+    if conflicts_df is not None and not conflicts_df.empty:
+        conflicts_df.assign(run_id=run_id).to_sql("import_conflicts", ENGINE, if_exists="append", index=False)
     return run_id
+
+
+def save_monitoring_override(
+    *, agent_key: str, report_month: str, action_type: str, reason: str, created_by: str
+) -> None:
+    _init_db()
+    with ENGINE.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO monitoring_overrides
+                (agent_key, report_month, action_type, reason, created_at, created_by)
+                VALUES (:agent_key, :report_month, :action_type, :reason, :created_at, :created_by)
+                """
+            ),
+            {
+                "agent_key": agent_key,
+                "report_month": report_month,
+                "action_type": action_type,
+                "reason": reason,
+                "created_at": datetime.utcnow().isoformat(),
+                "created_by": created_by,
+            },
+        )
+
+
+def load_monitoring_overrides(report_month: str | None = None) -> pd.DataFrame:
+    _init_db()
+    if report_month:
+        return pd.read_sql(
+            text("SELECT * FROM monitoring_overrides WHERE report_month = :report_month ORDER BY id DESC"),
+            ENGINE,
+            params={"report_month": report_month},
+        )
+    return pd.read_sql("SELECT * FROM monitoring_overrides ORDER BY id DESC", ENGINE)
 
 
 def load_audit_log() -> pd.DataFrame:

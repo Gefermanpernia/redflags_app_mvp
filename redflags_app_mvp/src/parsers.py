@@ -78,8 +78,6 @@ def normalize_week(value) -> int | None:
     if pd.isna(value):
         return None
     if isinstance(value, (int, float)):
-        if pd.isna(value):
-            return None
         week = int(value)
         return week if week > 0 else None
     text = str(value).strip().lower()
@@ -91,11 +89,7 @@ def normalize_week(value) -> int | None:
 
 
 def normalize_month_value(value, fallback_month: str) -> str:
-    if (
-        value is None
-        or (isinstance(value, float) and pd.isna(value))
-        or str(value).strip() == ""
-    ):
+    if value is None or (isinstance(value, float) and pd.isna(value)) or str(value).strip() == "":
         return fallback_month
     if hasattr(value, "strftime"):
         try:
@@ -118,84 +112,57 @@ def parse_production_frames(
     fallback_month: str,
 ) -> pd.DataFrame:
     parsed: List[pd.DataFrame] = []
-
     for sheet_name, df in frames.items():
         if layout == "long":
             out = pd.DataFrame(
                 {
                     "agent_name": _safe_series(df, mapping.get("agent_name")),
+                    "agent_code": _safe_series(df, mapping.get("agent_code"), default=""),
                     "hierarchy": _safe_series(df, mapping.get("hierarchy"), default=""),
                     "week": _safe_series(df, mapping.get("week")),
-                    "production_mtd": pd.to_numeric(
-                        _safe_series(df, mapping.get("production_mtd")), errors="coerce"
-                    ),
-                    "month": _safe_series(
-                        df, mapping.get("month"), default=fallback_month
-                    ),
+                    "production_mtd": pd.to_numeric(_safe_series(df, mapping.get("production_mtd")), errors="coerce"),
+                    "snapshot_date": _safe_series(df, mapping.get("snapshot_date"), default=""),
+                    "month": _safe_series(df, mapping.get("month"), default=fallback_month),
                     "source_sheet": sheet_name,
                 }
             )
             out["week"] = out["week"].apply(normalize_week)
-            out["month"] = out["month"].apply(
-                lambda value: normalize_month_value(value, fallback_month)
-            )
+            out["month"] = out["month"].apply(lambda value: normalize_month_value(value, fallback_month))
             out = out.dropna(subset=["production_mtd"])
             out = out[out["agent_name"].astype(str).str.strip() != ""]
             out = out.dropna(subset=["week"])
-            out = out.groupby(
-                ["source_sheet", "month", "agent_name", "hierarchy", "week"],
-                as_index=False,
-            )["production_mtd"].max()
             parsed.append(out)
             continue
 
         wide_rows: List[pd.DataFrame] = []
         for week in range(1, 6):
-            column_name = mapping.get(f"mtd_week_{week}")
-            if not column_name or column_name not in df.columns:
+            col = mapping.get(f"mtd_week_{week}")
+            if not col or col not in df.columns:
                 continue
-            temp = pd.DataFrame(
-                {
-                    "agent_name": _safe_series(df, mapping.get("agent_name")),
-                    "hierarchy": _safe_series(df, mapping.get("hierarchy"), default=""),
-                    "week": week,
-                    "production_mtd": pd.to_numeric(
-                        _safe_series(df, column_name), errors="coerce"
-                    ),
-                    "month": _safe_series(
-                        df, mapping.get("month"), default=fallback_month
-                    ),
-                    "source_sheet": sheet_name,
-                }
+            wide_rows.append(
+                pd.DataFrame(
+                    {
+                        "agent_name": _safe_series(df, mapping.get("agent_name")),
+                        "agent_code": _safe_series(df, mapping.get("agent_code"), default=""),
+                        "hierarchy": _safe_series(df, mapping.get("hierarchy"), default=""),
+                        "week": week,
+                        "production_mtd": pd.to_numeric(_safe_series(df, col), errors="coerce"),
+                        "snapshot_date": _safe_series(df, mapping.get("snapshot_date"), default=""),
+                        "month": _safe_series(df, mapping.get("month"), default=fallback_month),
+                        "source_sheet": sheet_name,
+                    }
+                )
             )
-            wide_rows.append(temp)
-
         if not wide_rows:
             continue
-
         out = pd.concat(wide_rows, ignore_index=True)
-        out["month"] = out["month"].apply(
-            lambda value: normalize_month_value(value, fallback_month)
-        )
+        out["month"] = out["month"].apply(lambda value: normalize_month_value(value, fallback_month))
         out = out.dropna(subset=["production_mtd"])
         out = out[out["agent_name"].astype(str).str.strip() != ""]
-        out = out.groupby(
-            ["source_sheet", "month", "agent_name", "hierarchy", "week"], as_index=False
-        )["production_mtd"].max()
         parsed.append(out)
 
     if not parsed:
-        return pd.DataFrame(
-            columns=[
-                "month",
-                "agent_name",
-                "hierarchy",
-                "week",
-                "production_mtd",
-                "source_sheet",
-            ]
-        )
-
+        return pd.DataFrame(columns=["month", "agent_name", "agent_code", "hierarchy", "week", "snapshot_date", "production_mtd", "source_sheet"])
     return pd.concat(parsed, ignore_index=True)
 
 
@@ -206,82 +173,53 @@ def parse_appointments_frames(
     fallback_month: str,
 ) -> pd.DataFrame:
     parsed: List[pd.DataFrame] = []
-
     for sheet_name, df in frames.items():
         if layout == "long":
             out = pd.DataFrame(
                 {
                     "agent_name": _safe_series(df, mapping.get("agent_name")),
+                    "agent_code": _safe_series(df, mapping.get("agent_code"), default=""),
                     "hierarchy": _safe_series(df, mapping.get("hierarchy"), default=""),
                     "week": _safe_series(df, mapping.get("week")),
-                    "appointments": pd.to_numeric(
-                        _safe_series(df, mapping.get("appointments")), errors="coerce"
-                    ),
-                    "month": _safe_series(
-                        df, mapping.get("month"), default=fallback_month
-                    ),
+                    "appointments": pd.to_numeric(_safe_series(df, mapping.get("appointments")), errors="coerce"),
+                    "month": _safe_series(df, mapping.get("month"), default=fallback_month),
                     "source_sheet": sheet_name,
                 }
             )
             out["week"] = out["week"].apply(normalize_week)
-            out["month"] = out["month"].apply(
-                lambda value: normalize_month_value(value, fallback_month)
-            )
+            out["month"] = out["month"].apply(lambda value: normalize_month_value(value, fallback_month))
             out = out.dropna(subset=["appointments"])
             out = out[out["agent_name"].astype(str).str.strip() != ""]
             out = out.dropna(subset=["week"])
-            out = out.groupby(
-                ["source_sheet", "month", "agent_name", "hierarchy", "week"],
-                as_index=False,
-            )["appointments"].sum()
             parsed.append(out)
             continue
 
         wide_rows: List[pd.DataFrame] = []
         for week in range(1, 6):
-            column_name = mapping.get(f"appointments_week_{week}")
-            if not column_name or column_name not in df.columns:
+            col = mapping.get(f"appointments_week_{week}")
+            if not col or col not in df.columns:
                 continue
-            temp = pd.DataFrame(
-                {
-                    "agent_name": _safe_series(df, mapping.get("agent_name")),
-                    "hierarchy": _safe_series(df, mapping.get("hierarchy"), default=""),
-                    "week": week,
-                    "appointments": pd.to_numeric(
-                        _safe_series(df, column_name), errors="coerce"
-                    ),
-                    "month": _safe_series(
-                        df, mapping.get("month"), default=fallback_month
-                    ),
-                    "source_sheet": sheet_name,
-                }
+            wide_rows.append(
+                pd.DataFrame(
+                    {
+                        "agent_name": _safe_series(df, mapping.get("agent_name")),
+                        "agent_code": _safe_series(df, mapping.get("agent_code"), default=""),
+                        "hierarchy": _safe_series(df, mapping.get("hierarchy"), default=""),
+                        "week": week,
+                        "appointments": pd.to_numeric(_safe_series(df, col), errors="coerce"),
+                        "month": _safe_series(df, mapping.get("month"), default=fallback_month),
+                        "source_sheet": sheet_name,
+                    }
+                )
             )
-            wide_rows.append(temp)
-
         if not wide_rows:
             continue
-
         out = pd.concat(wide_rows, ignore_index=True)
-        out["month"] = out["month"].apply(
-            lambda value: normalize_month_value(value, fallback_month)
-        )
+        out["month"] = out["month"].apply(lambda value: normalize_month_value(value, fallback_month))
         out = out.dropna(subset=["appointments"])
         out = out[out["agent_name"].astype(str).str.strip() != ""]
-        out = out.groupby(
-            ["source_sheet", "month", "agent_name", "hierarchy", "week"], as_index=False
-        )["appointments"].sum()
         parsed.append(out)
 
     if not parsed:
-        return pd.DataFrame(
-            columns=[
-                "month",
-                "agent_name",
-                "hierarchy",
-                "week",
-                "appointments",
-                "source_sheet",
-            ]
-        )
-
+        return pd.DataFrame(columns=["month", "agent_name", "agent_code", "hierarchy", "week", "appointments", "source_sheet"])
     return pd.concat(parsed, ignore_index=True)
