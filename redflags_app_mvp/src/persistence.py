@@ -77,6 +77,23 @@ def _init_db() -> None:
         conn.execute(
             text(
                 """
+                CREATE TABLE IF NOT EXISTS appointment_daily_fact (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_key TEXT NOT NULL,
+                    agent_code TEXT,
+                    agent_name TEXT NOT NULL,
+                    appointment_date TEXT NOT NULL,
+                    appointment_count REAL NOT NULL,
+                    source TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    created_by TEXT NOT NULL
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
                 CREATE TABLE IF NOT EXISTS operational_records (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     run_id INTEGER,
